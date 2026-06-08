@@ -4,7 +4,7 @@ version.workspace   = true
 edition.workspace   = true
 authors.workspace   = true
 license.workspace   = true
-description = "Safe, ergonomic Rust bindings to NTgCalls - Rust bindings for Telegram group calls"
+description = "Telegram voice and video calls, powered by NTgCalls."
 repository.workspace = true
 keywords    = ["telegram", "calls", "voip", "webrtc", "ntgcalls"]
 categories  = ["api-bindings", "multimedia"]
@@ -15,5 +15,5 @@ default  = ["bundled"]
 bundled  = ["ntgcalls/bundled"]
 
 [dependencies]
-ntgcalls = { path = "../ntgcalls" }
+ntgcalls = { path = "../ntgcalls", version = "0.1.0" }
 tracing     = "0.1"
