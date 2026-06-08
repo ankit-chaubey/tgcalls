@@ -1,0 +1,19 @@
+[package]
+name        = "tgcalls"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+description = "Safe, ergonomic Rust bindings to NTgCalls - Rust bindings for Telegram group calls"
+repository.workspace = true
+keywords    = ["telegram", "calls", "voip", "webrtc", "ntgcalls"]
+categories  = ["api-bindings", "multimedia"]
+readme      = "README.md"
+
+[features]
+default  = ["bundled"]
+bundled  = ["ntgcalls/bundled"]
+
+[dependencies]
+ntgcalls = { path = "../ntgcalls" }
+tracing     = "0.1"

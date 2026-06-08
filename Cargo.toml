@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["ntgcalls", "tgcalls"]
+
+[workspace.package]
+version    = "0.1.0"
+authors    = ["Ankit Chaubey <ankitchaubey.dev@gmail.com>"]
+edition    = "2024"
+license    = "MIT OR Apache-2.0"
+keywords   = ["telegram", "calls", "voip", "webrtc", "ntgcalls"]
+categories = ["api-bindings", "multimedia"]
+repository = "https://github.com/ankit-chaubey/tgcalls"
+readme     = "README.md"
+
+[profile.release]
+codegen-units = 1
+lto           = "fat"
+opt-level     = "s"
+strip         = "symbols"
