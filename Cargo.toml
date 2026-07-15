@@ -1,0 +1,49 @@
+[package]
+name        = "tgcalls"
+version     = "0.2.0"
+edition     = "2021"
+authors     = ["Ankit Chaubey"]
+license     = "MIT OR Apache-2.0"
+description = "Telegram group call / P2P call extension for ferogram using ntgcalls"
+keywords    = ["telegram", "voip", "calls", "ntgcalls", "ferogram"]
+
+[lib]
+name = "tgcalls"
+path = "src/lib.rs"
+
+[[example]]
+name = "group_audio_call"
+path = "examples/group_audio_call.rs"
+
+[[example]]
+name = "group_video_call"
+path = "examples/group_video_call.rs"
+
+[[example]]
+name = "group_av_call"
+path = "examples/group_av_call.rs"
+
+[[example]]
+name = "group_screen_share"
+path = "examples/group_screen_share.rs"
+
+[[example]]
+name = "p2p_audio_call"
+path = "examples/p2p_audio_call.rs"
+
+[[example]]
+name = "p2p_video_call"
+path = "examples/p2p_video_call.rs"
+
+[dependencies]
+ferogram   = { git = "https://github.com/ankit-chaubey/ferogram", branch = "main" }
+ntgcalls   = "=3.0.0-beta12"
+tokio      = { version = "1", features = ["full"] }
+thiserror  = "1"
+tracing    = "0.1"
+serde_json = "1"
+base64     = "0.22"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow             = "1"
