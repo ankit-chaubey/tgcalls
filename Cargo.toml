@@ -36,7 +36,7 @@ name = "p2p_video_call"
 path = "examples/p2p_video_call.rs"
 
 [dependencies]
-ferogram   = { git = "https://github.com/ankit-chaubey/ferogram", branch = "main" }
+ferogram   = "0.6.4"
 ntgcalls   = "=3.0.0-beta12"
 tokio      = { version = "1", features = ["full"] }
 thiserror  = "1"
