@@ -37,7 +37,7 @@ path = "examples/p2p_video_call.rs"
 
 [dependencies]
 ferogram   = "0.6.4"
-ntgcalls   = "=3.0.0-beta12"
+ntgcalls   = "=3.0.0-beta13"
 tokio      = { version = "1", features = ["full"] }
 thiserror  = "1"
 tracing    = "0.1"

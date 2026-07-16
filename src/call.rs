@@ -67,7 +67,10 @@ impl Call {
                     | ConnectionState::Closed => {
                         warn!(target: "tgcalls", "connection ended: {:?}", info.state);
                         if let Some(tx) = slot.take() {
-                            let _ = tx.send(Err(ntgcalls::Error::Connection));
+                            let _ = tx.send(Err(ntgcalls::Error {
+                                kind: ntgcalls::ErrorKind::Connection,
+                                message: format!("connection ended: {:?}", info.state),
+                            }));
                         }
                     }
                     ConnectionState::Connecting => {
@@ -279,7 +282,7 @@ impl Call {
                 part_id,
                 status,
                 quality_update,
-                frame,
+                Some(frame),
             )
             .await?)
     }

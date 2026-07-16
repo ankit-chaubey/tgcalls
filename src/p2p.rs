@@ -60,7 +60,7 @@ impl P2PCall {
 
         let g_a_hash_bytes = self
             .ntg
-            .init_exchange(self.user_id, &dh_config, &[])
+            .init_exchange(self.user_id, &dh_config, None)
             .await?;
         debug!(
             "p2p: init_exchange done, g_a_hash {} bytes",
@@ -114,7 +114,7 @@ impl P2PCall {
             .client
             .invoke(&ferogram::tl::functions::phone::ConfirmCall {
                 peer: signaling::input_phone_call(call_id, call_access_hash),
-                g_a: auth.ga_or_gb,
+                g_a: auth.g_a_or_b,
                 key_fingerprint: auth.key_fingerprint,
                 protocol: signaling::build_protocol()?,
             })
@@ -163,7 +163,7 @@ impl P2PCall {
         self.ntg.create_p2p_call(self.user_id).await?;
         let g_b = self
             .ntg
-            .init_exchange(self.user_id, &dh_config, &call.g_a_hash)
+            .init_exchange(self.user_id, &dh_config, Some(&call.g_a_hash))
             .await?;
         debug!("p2p: accept init_exchange done, g_b {} bytes", g_b.len());
 
@@ -249,7 +249,7 @@ impl P2PCall {
 
         // custom_parameters: unused for now.
         self.ntg
-            .connect_p2p(self.user_id, servers, versions, p2p_allowed, "")
+            .connect_p2p(self.user_id, servers, versions, p2p_allowed, None)
             .await?;
         self.state = P2PCallState::Connecting;
         debug!("p2p: connect_p2p called with {} servers", servers.len());
