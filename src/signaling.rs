@@ -1,10 +1,8 @@
 use crate::error::TgCallsError;
 use ferogram::{tl, Client};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub async fn resolve_call(
-    client: &Client,
-    chat_id: i64,
-) -> Result<tl::enums::InputGroupCall, TgCallsError> {
+async fn resolve_channel(client: &Client, chat_id: i64) -> Result<(i64, i64), TgCallsError> {
     let channel_id = if chat_id < -1_000_000_000_000 {
         (-chat_id) - 1_000_000_000_000
     } else {
@@ -27,6 +25,15 @@ pub async fn resolve_call(
         tl::enums::messages::Chats::Slice(c) => extract_access_hash(c.chats)?,
     };
 
+    Ok((channel_id, access_hash))
+}
+
+pub async fn resolve_call(
+    client: &Client,
+    chat_id: i64,
+) -> Result<tl::enums::InputGroupCall, TgCallsError> {
+    let (channel_id, access_hash) = resolve_channel(client, chat_id).await?;
+
     let full = client
         .invoke(&tl::functions::channels::GetFullChannel {
             channel: tl::enums::InputChannel::InputChannel(tl::types::InputChannel {
@@ -43,6 +50,50 @@ pub async fn resolve_call(
     match full_chat {
         tl::enums::ChatFull::ChannelFull(cf) => cf.call.ok_or(TgCallsError::NoActiveGroupCall),
         _ => Err(TgCallsError::NoActiveGroupCall),
+    }
+}
+
+/// Starts a new voice chat in `chat_id`. Fails if one is already active -
+/// use `resolve_call` first (or `resolve_or_create_call`) if that's fine.
+pub async fn create_group_call(
+    client: &Client,
+    chat_id: i64,
+) -> Result<tl::enums::InputGroupCall, TgCallsError> {
+    let (channel_id, access_hash) = resolve_channel(client, chat_id).await?;
+
+    // Telegram just needs this for de-duplicating retried requests; a
+    // time-based value is unique enough without pulling in a `rand` dep.
+    let random_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as i32)
+        .unwrap_or(0);
+
+    let updates = client
+        .invoke(&tl::functions::phone::CreateGroupCall {
+            rtmp_stream: false,
+            peer: tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
+                channel_id,
+                access_hash,
+            }),
+            random_id,
+            title: None,
+            schedule_date: None,
+        })
+        .await?;
+
+    extract_created_call(updates).ok_or_else(|| {
+        TgCallsError::TransportParse("no GroupCall in createGroupCall response".into())
+    })
+}
+
+/// `resolve_call`, but starts a voice chat first if none is active yet.
+pub async fn resolve_or_create_call(
+    client: &Client,
+    chat_id: i64,
+) -> Result<tl::enums::InputGroupCall, TgCallsError> {
+    match resolve_call(client, chat_id).await {
+        Err(TgCallsError::NoActiveGroupCall) => create_group_call(client, chat_id).await,
+        other => other,
     }
 }
 
@@ -127,6 +178,64 @@ pub async fn set_muted(
         })
         .await?;
     Ok(())
+}
+
+/// Sets how loud `user_id` sounds to *you* in this call (0 = muted for you,
+/// 10000 = 100%, up to 20000 = 200%). This is a per-listener preference
+/// synced to your account, not a broadcast-wide volume control.
+pub async fn set_volume(
+    client: &Client,
+    call: tl::enums::InputGroupCall,
+    user_id: i64,
+    access_hash: i64,
+    volume: i32,
+) -> Result<(), TgCallsError> {
+    client
+        .invoke(&tl::functions::phone::EditGroupCallParticipant {
+            call,
+            participant: tl::enums::InputPeer::User(tl::types::InputPeerUser {
+                user_id,
+                access_hash,
+            }),
+            muted: None,
+            volume: Some(volume.clamp(0, 20000)),
+            raise_hand: None,
+            video_stopped: None,
+            video_paused: None,
+            presentation_paused: None,
+        })
+        .await?;
+    Ok(())
+}
+
+pub async fn get_participants(
+    client: &Client,
+    call: tl::enums::InputGroupCall,
+) -> Result<Vec<tl::types::GroupCallParticipant>, TgCallsError> {
+    let mut out = Vec::new();
+    let mut offset = String::new();
+    loop {
+        let resp = client
+            .invoke(&tl::functions::phone::GetGroupParticipants {
+                call: call.clone(),
+                ids: vec![],
+                sources: vec![],
+                offset: offset.clone(),
+                limit: 100,
+            })
+            .await?;
+        let tl::enums::phone::GroupParticipants::GroupParticipants(page) = resp;
+        let page_len = page.participants.len();
+        for p in page.participants {
+            let tl::enums::GroupCallParticipant::GroupCallParticipant(p) = p;
+            out.push(p);
+        }
+        if page_len < 100 || page.next_offset.is_empty() {
+            break;
+        }
+        offset = page.next_offset;
+    }
+    Ok(out)
 }
 
 pub async fn get_dh_config(client: &Client) -> Result<tl::types::messages::DhConfig, TgCallsError> {
@@ -259,6 +368,27 @@ fn extract_transport_json(updates: tl::enums::Updates, presentation: bool) -> Op
             if gc.presentation == presentation {
                 let tl::enums::DataJson::DataJson(d) = gc.params;
                 return Some(d.data);
+            }
+        }
+    }
+    None
+}
+
+fn extract_created_call(updates: tl::enums::Updates) -> Option<tl::enums::InputGroupCall> {
+    let list = match updates {
+        tl::enums::Updates::Updates(u) => u.updates,
+        tl::enums::Updates::Combined(u) => u.updates,
+        _ => return None,
+    };
+    for upd in list {
+        if let tl::enums::Update::GroupCall(u) = upd {
+            if let tl::enums::GroupCall::GroupCall(gc) = u.call {
+                return Some(tl::enums::InputGroupCall::InputGroupCall(
+                    tl::types::InputGroupCall {
+                        id: gc.id,
+                        access_hash: gc.access_hash,
+                    },
+                ));
             }
         }
     }

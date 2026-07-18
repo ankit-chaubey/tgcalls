@@ -25,4 +25,7 @@ pub enum TgCallsError {
 
     #[error("no active P2P call for this user")]
     P2PNotActive,
+
+    #[error("this chat's call worker thread is gone (panicked or already torn down)")]
+    WorkerGone,
 }

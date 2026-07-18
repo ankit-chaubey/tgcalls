@@ -17,6 +17,14 @@ pub enum P2PCallState {
     Ended,
 }
 
+/// The call ended after `connect()` had already succeeded - the other side
+/// hung up, missed it, or declined. `request()`/`accept()` handle discards
+/// *during* setup themselves (as an `Err`); this is only for a live call.
+#[derive(Debug, Clone)]
+pub enum P2PEvent {
+    Discarded(Option<ferogram::tl::enums::PhoneCallDiscardReason>),
+}
+
 pub struct P2PCall {
     client: ferogram::Client,
     user_id: i64,
@@ -446,6 +454,21 @@ impl P2PCall {
 
     pub fn state(&self) -> P2PCallState {
         self.state
+    }
+
+    /// Feed this raw `PhoneCall` updates from your own update loop after
+    /// `connect()` has succeeded, to detect the other side hanging up on an
+    /// already-live call. Returns `None` for anything not relevant to this
+    /// call.
+    pub fn handle_update(&mut self, call: &ferogram::tl::enums::PhoneCall) -> Option<P2PEvent> {
+        let ferogram::tl::enums::PhoneCall::Discarded(d) = call else {
+            return None;
+        };
+        if Some(d.id) != self.call_id {
+            return None;
+        }
+        self.state = P2PCallState::Ended;
+        Some(P2PEvent::Discarded(d.reason.clone()))
     }
 
     async fn wait_for_accept(
