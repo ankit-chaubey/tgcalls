@@ -2,9 +2,9 @@
 name        = "tgcalls"
 version     = "0.2.0"
 edition     = "2021"
-authors     = ["Ankit Chaubey"]
+authors     = ["Ankit Chaubey <ankitchaubey.dev@gmail.com>"]
 license     = "MIT OR Apache-2.0"
-description = "Telegram group call / P2P call extension for ferogram using ntgcalls"
+description = "An elegant Rust client for Telegram voice and video calls."
 keywords    = ["telegram", "voip", "calls", "ntgcalls", "ferogram"]
 
 [lib]
