@@ -95,14 +95,16 @@ Direct, one-on-one calls work the same way in spirit, ring someone, exchange key
 
 Video and screen share follow the same pattern, `Media::video`, `Media::av`, and `Media::screen` build the right ffmpeg pipeline for you. The `examples/` folder has a short, working file for each of these, that's genuinely the fastest way to see how it all fits together.
 
-## Things makes tgcalls possible!
+## Credits
 
 TgCalls wouldn't exist without these projects and the people behind them.
 
-* <b><a href="https://github.com/ankit-chaubey">@ankit-chaubey</a> for [TgCalls](https://github.com/ankit-chaubey/tgcalls) and [Ferogram](https://github.com/ankit-chaubey/ferogram)
+* <b><a href="https://github.com/ankit-chaubey">@ankit-chaubey</a>
+    * Creator of [TgCalls](https://github.com/ankit-chaubey/tgcalls) and [Ferogram](https://github.com/ankit-chaubey/ferogram)
 
-* <b><a href="https://github.com/Laky-64">@Laky-64</a> for [NTgCalls](https://github.com/pytgcalls/ntgcalls)
+* <b><a href="https://github.com/Laky-64">@Laky-64</a>
+    * Creator of [NTgCalls](https://github.com/pytgcalls/ntgcalls)
 
 ## License
 
-Licensed under either the MIT License or the Apache License 2.0, at your option. See `LICENSE-MIT` and `LICENSE-APACHE` for details.
+Licensed under either the [MIT License](https://github.com/ankit-chaubey/tgcalls/blob/main/LICENSE-MIT) or the [Apache License 2.0](https://github.com/ankit-chaubey/tgcalls/blob/main/LICENSE-APACHE), at your option.
