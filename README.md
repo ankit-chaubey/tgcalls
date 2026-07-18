@@ -22,46 +22,70 @@
     </a>
 </p>
 
-# tgcalls [![Crates.io](https://img.shields.io/crates/v/tgcalls.svg?logo=rust&logoColor=%23959DA5&label=crates.io&labelColor=%23282f37&color=%23e5710a)](https://crates.io/crates/tgcalls) [![Downloads](https://img.shields.io/crates/d/tgcalls?logoColor=%23959DA5&labelColor=%23282f37&color=%2328A745)](https://crates.io/crates/tgcalls) [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg?labelColor=%23282f37)](#license)
+# TgCalls [![Crates.io](https://img.shields.io/crates/v/tgcalls.svg?logo=rust&logoColor=%23959DA5&label=crates.io&labelColor=%23282f37&color=%23e5710a)](https://crates.io/crates/tgcalls) [![Downloads](https://img.shields.io/crates/d/tgcalls?logoColor=%23959DA5&labelColor=%23282f37&color=%2328A745)](https://crates.io/crates/tgcalls)
 
-tgcalls brings real voice and video calling to Telegram bots and clients written in Rust. It sits between two libraries that don't know about each other: [ferogram](https://github.com/ankit-chaubey/ferogram) speaks MTProto to Telegram, and [ntgcalls](https://github.com/pytgcalls/ntgcalls) does the actual WebRTC work of getting audio and video across the wire. tgcalls wires them together so joining a call, or starting one, is a single clean call instead of two libraries you have to coordinate by hand.
+**TgCalls** brings voice and video calling to Telegram clients written in Rust. It bridges Telegram's calling stack with a clean Rust API, making it easy to stream media, join voice chats, and integrate voice and video calling into your Telegram clients.
 
-If you're building a music bot, a voice assistant, or anything that needs to be present in a Telegram call, this is the fastest way there.
+Whether you're building a music bot, a voice assistant, or any application that needs to participate in Telegram calls, TgCalls gets you there with a simple and ergonomic API.
 
-**A note on where this stands:** the core flow works, join a call, stream into it, leave, and there's a full P2P calling path too, but it's still early. No reconnect handling, no seek or volume controls, no queueing yet. Treat it as a solid foundation to build on rather than something finished.
+## Getting Started
 
-## Getting started
+Add `tgcalls` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+tgcalls = "0.2"
+```
+
+Before using `tgcalls`, make sure you have:
+
+- **FFmpeg** available on your `PATH` for media decoding.
+- **A C++ toolchain** and development libraries required to build `NTgCalls`.
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential zlib1g-dev ffmpeg
+```
+
+## Examples
+
+To try the examples:
 
 ```bash
 git clone https://github.com/ankit-chaubey/tgcalls.git
 cd tgcalls
+
 export API_ID=123456
 export API_HASH=your_api_hash_here
+
+cargo run --example group_audio_call -- -1001234567890 /path/to/song.mp3
 ```
 
-You'll need ffmpeg on your PATH (it decodes whatever media you give it into the raw audio/video ntgcalls wants) and a C++ toolchain, since ntgcalls' native core is built on WebRTC:
-
-```bash
-apt install build-essential zlib1g-dev
-```
-
-First run will ask for your phone number and login code, then save a session so you only do that once.
+On the first run, you'll be asked to sign in with your phone number and login code. Your session is then saved locally, so you only need to authenticate once.
 
 <p align="center">
     <img src="https://raw.githubusercontent.com/ankit-chaubey/tgcalls/main/.github/images/banner.png" alt="tgcalls banner" />
 </p>
 
-## Let's stream
+## Let's Stream
 
-Joining a group call and playing a file into it is three lines:
+Joining a group call and playing a file takes just a few lines:
 
 ```rust
-let mut call = Call::new(client, chat_id);
-call.join(Media::audio("/path/to/song.mp3")).await?;
-call.leave().await?;
+let calls = Calls::new(client);
+calls.play(chat_id, "song.mp3").await?;
 ```
 
-Behind that `join`, tgcalls looks up the group's active call through ferogram, asks ntgcalls to open a session, exchanges transport info with Telegram, and once the connection is up, points ntgcalls at ffmpeg to start streaming your file. All of that happens for you.
+Behind the scenes, **TgCalls** handles everything required to get your media into the call. It creates or joins the group call, establishes the media connection, negotiates with Telegram, and streams your audio or video through FFmpeg. All you need to provide is the client, the chat, and the media you want to play.
+
+To leave the call:
+
+```rust
+calls.leave(chat_id).await?;
+```
+
+Let's go through the [examples](https://github.com/ankit-chaubey/tgcalls/tree/main/examples) to see it in action:
 
 ```bash
 cargo run --example group_audio_call -- -1001234567890 /path/to/song.mp3
@@ -71,6 +95,14 @@ Direct, one-on-one calls work the same way in spirit, ring someone, exchange key
 
 Video and screen share follow the same pattern, `Media::video`, `Media::av`, and `Media::screen` build the right ffmpeg pipeline for you. The `examples/` folder has a short, working file for each of these, that's genuinely the fastest way to see how it all fits together.
 
+## Things makes tgcalls possible!
+
+TgCalls wouldn't exist without these projects and the people behind them.
+
+* <b><a href="https://github.com/ankit-chaubey">@ankit-chaubey</a> for [TgCalls](https://github.com/ankit-chaubey/tgcalls) and [Ferogram](https://github.com/ankit-chaubey/ferogram)
+
+* <b><a href="https://github.com/Laky-64">@Laky-64</a> for [NTgCalls](https://github.com/pytgcalls/ntgcalls)
+
 ## License
 
-Dual licensed under MIT or Apache 2.0, whichever works better for you. See `LICENSE-MIT` and `LICENSE-APACHE`.
+Licensed under either the MIT License or the Apache License 2.0, at your option. See `LICENSE-MIT` and `LICENSE-APACHE` for details.
