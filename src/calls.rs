@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ferogram::middleware::{BoxFuture, Middleware, Next};
 use ferogram::tl;
@@ -18,13 +19,48 @@ use ferogram::Update;
 use ntgcalls::{CallType, ConnectionMode, MediaDescription, StreamMode};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::media::{auto_media_at, probe_duration};
 use crate::{auto_media, error::TgCallsError, Call, CallEvent};
 
 type EventHandler = Arc<dyn Fn(i64, CallEvent) + Send + Sync>;
 type Reply<T> = oneshot::Sender<Result<T, TgCallsError>>;
 
+/// How far into the current stream you are. `total`/`remaining` are `None`
+/// for sources with no fixed length (a live stream, a device, a recording
+/// target) - `ffprobe` genuinely can't tell you that.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Progress {
+    pub elapsed: Duration,
+    pub total: Option<Duration>,
+}
+
+impl Progress {
+    pub fn remaining(&self) -> Option<Duration> {
+        self.total.map(|t| t.saturating_sub(self.elapsed))
+    }
+
+    pub fn percent(&self) -> Option<f64> {
+        self.total
+            .filter(|t| !t.is_zero())
+            .map(|t| self.elapsed.as_secs_f64() / t.as_secs_f64() * 100.0)
+    }
+}
+
+/// A one-call snapshot of everything about a chat's call worth checking at
+/// once, instead of five separate round trips.
+#[derive(Debug, Clone)]
+pub struct CallStatus {
+    pub joined: bool,
+    pub call_type: Option<CallType>,
+    pub connection_mode: Option<ConnectionMode>,
+    pub muted: bool,
+    pub video_paused: bool,
+    pub progress: Progress,
+}
+
 enum Command {
-    Play(MediaDescription, Reply<()>),
+    Play(MediaDescription, Option<Duration>, Reply<()>),
+    Seek(MediaDescription, Option<Duration>, Duration, Reply<()>),
     Record(MediaDescription, Reply<()>),
     Leave(Reply<()>),
     Pause(Reply<()>),
@@ -35,6 +71,8 @@ enum Command {
     GetParticipants(Reply<Vec<tl::types::GroupCallParticipant>>),
     CallType(Reply<CallType>),
     ConnectionMode(Reply<ConnectionMode>),
+    Progress(Reply<Progress>),
+    Status(Reply<CallStatus>),
     IsJoined(oneshot::Sender<bool>),
     RouteUpdate(tl::types::UpdateGroupCallParticipants),
     RouteCallEnded(i64),
@@ -63,14 +101,46 @@ impl Worker {
                     call.on_event(move |event| handler(chat_id, event));
                 }
 
+                // Tracks the *current* stream's position, since ntgcalls'
+                // own time() accumulates across the whole session rather
+                // than resetting per-track (confirmed against the native
+                // source: sink objects are created once and reused across
+                // set_stream_sources calls). `baseline_secs` is time()'s
+                // value captured right after the current track started, so
+                // `time() - baseline_secs` is always this track's elapsed
+                // time regardless of what came before it.
+                let mut track_duration: Option<Duration> = None;
+                let mut seek_offset = Duration::ZERO;
+                let mut baseline_secs: u64 = 0;
+
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
-                        Command::Play(media, reply) => {
+                        Command::Play(media, duration, reply) => {
                             let result = if call.is_joined() {
                                 call.set_stream_sources(StreamMode::Capture, &media).await
                             } else {
                                 call.create_and_join(media).await
                             };
+                            if result.is_ok() {
+                                track_duration = duration;
+                                seek_offset = Duration::ZERO;
+                                baseline_secs =
+                                    call.played_seconds(StreamMode::Capture).await.unwrap_or(0);
+                            }
+                            let _ = reply.send(result);
+                        }
+                        Command::Seek(media, duration, offset, reply) => {
+                            let result = if call.is_joined() {
+                                call.set_stream_sources(StreamMode::Capture, &media).await
+                            } else {
+                                call.create_and_join(media).await
+                            };
+                            if result.is_ok() {
+                                track_duration = duration;
+                                seek_offset = offset;
+                                baseline_secs =
+                                    call.played_seconds(StreamMode::Capture).await.unwrap_or(0);
+                            }
                             let _ = reply.send(result);
                         }
                         Command::Record(media, reply) => {
@@ -111,6 +181,42 @@ impl Worker {
                         }
                         Command::ConnectionMode(reply) => {
                             let _ = reply.send(call.connection_mode().await);
+                        }
+                        Command::Progress(reply) => {
+                            let result =
+                                call.played_seconds(StreamMode::Capture).await.map(|raw| {
+                                    let delta =
+                                        Duration::from_secs(raw.saturating_sub(baseline_secs));
+                                    Progress {
+                                        elapsed: seek_offset + delta,
+                                        total: track_duration,
+                                    }
+                                });
+                            let _ = reply.send(result);
+                        }
+                        Command::Status(reply) => {
+                            let result = async {
+                                let raw =
+                                    call.played_seconds(StreamMode::Capture).await.unwrap_or(0);
+                                let delta = Duration::from_secs(raw.saturating_sub(baseline_secs));
+                                let progress = Progress {
+                                    elapsed: seek_offset + delta,
+                                    total: track_duration,
+                                };
+                                let media_state = call.media_state().await.ok();
+                                Ok(CallStatus {
+                                    joined: call.is_joined(),
+                                    call_type: call.call_type().await.ok(),
+                                    connection_mode: call.connection_mode().await.ok(),
+                                    muted: media_state.as_ref().map(|s| s.muted).unwrap_or(false),
+                                    video_paused: media_state
+                                        .map(|s| s.video_paused)
+                                        .unwrap_or(false),
+                                    progress,
+                                })
+                            }
+                            .await;
+                            let _ = reply.send(result);
                         }
                         Command::IsJoined(reply) => {
                             let _ = reply.send(call.is_joined());
@@ -219,9 +325,49 @@ impl Calls {
     /// resolution, screen share, external frames, or joining without
     /// auto-starting) use [`Call`] directly.
     pub async fn play(&self, chat_id: i64, source: impl Into<String>) -> Result<(), TgCallsError> {
-        let media = auto_media(&source.into(), 1280, 720, 30);
+        let source = source.into();
+        // auto_media/probe_duration shell out to ffprobe synchronously (up
+        // to PROBE_TIMEOUT) - keep that off whatever runtime thread called
+        // us, not just off the worker's.
+        let (media, duration) = tokio::task::spawn_blocking({
+            let source = source.clone();
+            move || (auto_media(&source, 1280, 720, 30), probe_duration(&source))
+        })
+        .await
+        .expect("tgcalls: media probe task panicked");
+
         let worker = self.get_or_create(chat_id).await;
-        worker.send(|r| Command::Play(media, r)).await
+        worker.send(|r| Command::Play(media, duration, r)).await
+    }
+
+    /// Restarts the stream at `offset` into `source` (fast, keyframe-based
+    /// input seeking - not frame-accurate, see the `media` module docs).
+    /// Joins first if not already in the call, same as `play`. Only
+    /// meaningful for a seekable source (a file or a static URL, not a
+    /// live stream).
+    pub async fn seek(
+        &self,
+        chat_id: i64,
+        source: impl Into<String>,
+        offset: Duration,
+    ) -> Result<(), TgCallsError> {
+        let source = source.into();
+        let (media, duration) = tokio::task::spawn_blocking({
+            let source = source.clone();
+            move || {
+                (
+                    auto_media_at(&source, offset, 1280, 720, 30),
+                    probe_duration(&source),
+                )
+            }
+        })
+        .await
+        .expect("tgcalls: media probe task panicked");
+
+        let worker = self.get_or_create(chat_id).await;
+        worker
+            .send(|r| Command::Seek(media, duration, offset, r))
+            .await
     }
 
     /// Records `media` (see `Media::record_audio`/`record_video`/
@@ -231,6 +377,20 @@ impl Calls {
             .await
             .send(|r| Command::Record(media, r))
             .await
+    }
+
+    /// How far into the current stream `chat_id` is. `total`/`remaining`
+    /// are `None` for sources ffprobe couldn't measure (a live stream, a
+    /// device, a recording target).
+    pub async fn progress(&self, chat_id: i64) -> Result<Progress, TgCallsError> {
+        self.get(chat_id).await?.send(Command::Progress).await
+    }
+
+    /// A one-call snapshot of `chat_id`'s call: joined state, call type,
+    /// connection mode, mute/video-pause flags, and progress - instead of
+    /// five separate round trips.
+    pub async fn status(&self, chat_id: i64) -> Result<CallStatus, TgCallsError> {
+        self.get(chat_id).await?.send(Command::Status).await
     }
 
     /// Leaves `chat_id`'s call and tears down its worker thread.
@@ -285,6 +445,35 @@ impl Calls {
 
     pub async fn connection_mode(&self, chat_id: i64) -> Result<ConnectionMode, TgCallsError> {
         self.get(chat_id).await?.send(Command::ConnectionMode).await
+    }
+
+    /// Leaves every tracked chat concurrently and tears down their worker
+    /// threads. Returns each chat's leave result, so one bad chat doesn't
+    /// block reporting on the rest.
+    ///
+    /// Not a `Drop` impl - `Calls` is cheap to clone (every clone shares the
+    /// same state), so tying shutdown to one clone's lifetime would fire at
+    /// the wrong time whenever any clone happened to drop first. Call this
+    /// once, yourself, from your own shutdown handling (e.g. on Ctrl+C).
+    pub async fn shutdown(&self) -> Vec<(i64, Result<(), TgCallsError>)> {
+        let chat_ids: Vec<i64> = self.active.lock().await.keys().copied().collect();
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for chat_id in chat_ids {
+            let calls = self.clone();
+            tasks.spawn(async move {
+                let result = calls.leave(chat_id).await;
+                (chat_id, result)
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok(pair) = joined {
+                results.push(pair);
+            }
+        }
+        results
     }
 
     pub async fn is_joined(&self, chat_id: i64) -> bool {

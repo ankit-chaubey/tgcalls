@@ -35,6 +35,26 @@ path = "examples/p2p_audio_call.rs"
 name = "p2p_video_call"
 path = "examples/p2p_video_call.rs"
 
+[[example]]
+name = "graceful_shutdown"
+path = "examples/graceful_shutdown.rs"
+
+[[example]]
+name = "mute_resume_calls"
+path = "examples/mute_resume_calls.rs"
+
+[[example]]
+name = "recording_calls"
+path = "examples/recording_calls.rs"
+
+[[example]]
+name = "queue_calls"
+path = "examples/queue_calls.rs"
+
+[[example]]
+name = "simple_calls"
+path = "examples/simple_calls.rs"
+
 [dependencies]
 ferogram   = "0.6.4"
 ntgcalls   = "=3.0.0-beta13"

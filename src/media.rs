@@ -54,6 +54,24 @@ pub fn auto_media(source: &str, width: i16, height: i16, fps: u8) -> MediaDescri
     }
 }
 
+/// Like [`auto_media`], starting at `offset` into the source. Used by
+/// [`crate::Calls::seek`].
+pub fn auto_media_at(
+    source: &str,
+    offset: Duration,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> MediaDescription {
+    let has_video = has_stream(source, "v");
+    let has_audio = has_stream(source, "a");
+    match (has_video, has_audio) {
+        (true, true) => Media::av_at(source, source, offset, width, height, fps),
+        (true, false) => Media::video_at(source, offset, width, height, fps),
+        _ => Media::audio_at(source, offset),
+    }
+}
+
 pub struct Media;
 
 /// How long we wait on `ffprobe` before giving up and falling back to the
@@ -93,6 +111,34 @@ fn run_with_timeout(
 
 /// Reads the source's real width/height via ffprobe. Returns `None` if
 /// ffprobe is missing, times out, or the source has no video stream.
+/// Total duration of `path`, or `None` if ffprobe fails/times out or the
+/// source has no fixed length (a live stream, a device).
+pub fn probe_duration(path: &str) -> Option<Duration> {
+    let child = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let output = run_with_timeout(child, PROBE_TIMEOUT)?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let secs: f64 = text.trim().parse().ok()?;
+    (secs > 0.0 && secs.is_finite()).then(|| Duration::from_secs_f64(secs))
+}
+
 fn probe_dimensions(path: &str) -> Option<(u32, u32)> {
     let child = Command::new("ffprobe")
         .args([
@@ -154,31 +200,46 @@ fn resolve_dims(path: &str, width: i16, height: i16) -> (u32, u32) {
     }
 }
 
-fn audio_cmd(path: &str) -> String {
+fn audio_cmd(path: &str, offset: Duration) -> String {
     let reconnect = if needs_reconnect(path) {
         RECONNECT_FLAGS
     } else {
         ""
     };
+    let seek = seek_flag(offset);
     format!(
-        "ffmpeg -v error {reconnect} -i {path:?} -vn -f s16le -ar 48000 -ac 2 pipe:1",
+        "ffmpeg -v error {seek}{reconnect} -i {path:?} -vn -f s16le -ar 48000 -ac 2 pipe:1",
+        seek = seek,
         reconnect = reconnect,
         path = path,
     )
 }
 
-fn video_cmd(path: &str, w: u32, h: u32, fps: u8) -> String {
+fn video_cmd(path: &str, w: u32, h: u32, fps: u8, offset: Duration) -> String {
     let reconnect = if needs_reconnect(path) {
         RECONNECT_FLAGS
     } else {
         ""
     };
+    let seek = seek_flag(offset);
     format!(
-        "ffmpeg -v error {reconnect} -i {path:?} -an -f rawvideo -pix_fmt yuv420p \
+        "ffmpeg -v error {seek}{reconnect} -i {path:?} -an -f rawvideo -pix_fmt yuv420p \
          -vf scale={w}:{h},fps={fps} pipe:1",
+        seek = seek,
         reconnect = reconnect,
         path = path,
     )
+}
+
+/// `-ss` before `-i` is fast, keyframe-based input seeking (as opposed to
+/// `-ss` after `-i`, which decodes from the start - slow). Empty for zero
+/// offset so the command looks identical to the no-seek case.
+fn seek_flag(offset: Duration) -> String {
+    if offset.is_zero() {
+        String::new()
+    } else {
+        format!("-ss {:.3} ", offset.as_secs_f64())
+    }
 }
 
 fn record_audio_cmd(path: &str) -> String {
@@ -200,7 +261,26 @@ impl Media {
                 media_source: MediaSource::Shell,
                 sample_rate: 48000,
                 channel_count: 2,
-                input: audio_cmd(&path),
+                input: audio_cmd(&path, Duration::ZERO),
+                keep_open: false,
+            }),
+            speaker: None,
+            camera: None,
+            screen: None,
+        }
+    }
+
+    /// Like [`Media::audio`], starting playback at `offset` into the source
+    /// (fast, keyframe-based - see the module docs on seeking for the
+    /// accuracy tradeoff).
+    pub fn audio_at(path: impl Into<String>, offset: Duration) -> MediaDescription {
+        let path = path.into();
+        MediaDescription {
+            microphone: Some(AudioDescription {
+                media_source: MediaSource::Shell,
+                sample_rate: 48000,
+                channel_count: 2,
+                input: audio_cmd(&path, offset),
                 keep_open: false,
             }),
             speaker: None,
@@ -239,7 +319,32 @@ impl Media {
                 width: w as i16,
                 height: h as i16,
                 fps,
-                input: video_cmd(&path, w, h, fps),
+                input: video_cmd(&path, w, h, fps, Duration::ZERO),
+                keep_open: false,
+            }),
+            screen: None,
+        }
+    }
+
+    /// Like [`Media::video`], starting at `offset` into the source.
+    pub fn video_at(
+        path: impl Into<String>,
+        offset: Duration,
+        width: i16,
+        height: i16,
+        fps: u8,
+    ) -> MediaDescription {
+        let path = path.into();
+        let (w, h) = resolve_dims(&path, width, height);
+        MediaDescription {
+            microphone: None,
+            speaker: None,
+            camera: Some(VideoDescription {
+                media_source: MediaSource::Shell,
+                width: w as i16,
+                height: h as i16,
+                fps,
+                input: video_cmd(&path, w, h, fps, offset),
                 keep_open: false,
             }),
             screen: None,
@@ -263,7 +368,7 @@ impl Media {
                 media_source: MediaSource::Shell,
                 sample_rate: 48000,
                 channel_count: 2,
-                input: audio_cmd(&audio_path),
+                input: audio_cmd(&audio_path, Duration::ZERO),
                 keep_open: false,
             }),
             speaker: None,
@@ -272,7 +377,40 @@ impl Media {
                 width: w as i16,
                 height: h as i16,
                 fps,
-                input: video_cmd(&video_path, w, h, fps),
+                input: video_cmd(&video_path, w, h, fps, Duration::ZERO),
+                keep_open: false,
+            }),
+            screen: None,
+        }
+    }
+
+    /// Like [`Media::av`], starting both streams at `offset` into the source.
+    pub fn av_at(
+        audio_path: impl Into<String>,
+        video_path: impl Into<String>,
+        offset: Duration,
+        width: i16,
+        height: i16,
+        fps: u8,
+    ) -> MediaDescription {
+        let audio_path = audio_path.into();
+        let video_path = video_path.into();
+        let (w, h) = resolve_dims(&video_path, width, height);
+        MediaDescription {
+            microphone: Some(AudioDescription {
+                media_source: MediaSource::Shell,
+                sample_rate: 48000,
+                channel_count: 2,
+                input: audio_cmd(&audio_path, offset),
+                keep_open: false,
+            }),
+            speaker: None,
+            camera: Some(VideoDescription {
+                media_source: MediaSource::Shell,
+                width: w as i16,
+                height: h as i16,
+                fps,
+                input: video_cmd(&video_path, w, h, fps, offset),
                 keep_open: false,
             }),
             screen: None,
