@@ -109,8 +109,6 @@ fn run_with_timeout(
     child.wait_with_output().ok()
 }
 
-/// Reads the source's real width/height via ffprobe. Returns `None` if
-/// ffprobe is missing, times out, or the source has no video stream.
 /// Total duration of `path`, or `None` if ffprobe fails/times out or the
 /// source has no fixed length (a live stream, a device).
 pub fn probe_duration(path: &str) -> Option<Duration> {
@@ -139,6 +137,8 @@ pub fn probe_duration(path: &str) -> Option<Duration> {
     (secs > 0.0 && secs.is_finite()).then(|| Duration::from_secs_f64(secs))
 }
 
+/// Reads the source's real width/height via ffprobe. Returns `None` if
+/// ffprobe is missing, times out, or the source has no video stream.
 fn probe_dimensions(path: &str) -> Option<(u32, u32)> {
     let child = Command::new("ffprobe")
         .args([

@@ -203,12 +203,28 @@ impl Call {
     /// Registers a handler for everything in [`CallEvent`] - stream end,
     /// participant changes, unexpected removal, the call ending. Call
     /// before `join()`.
+    ///
+    /// Must be called from inside a Tokio runtime (it is - every caller
+    /// runs from inside `rt.block_on` or `#[tokio::main]`). ntgcalls fires
+    /// `on_stream_end` (and every other `on_*` callback) synchronously on
+    /// its own native WebRTC thread, never on a Tokio thread, so we can't
+    /// just call `handler` in place: if `handler` does anything that needs
+    /// a runtime (`tokio::spawn`, `.await`, a timer, ...) it aborts with
+    /// "there is no reactor running". We capture this thread's `Handle`
+    /// now and `spawn` onto it from the callback instead, so `handler`
+    /// always runs as a proper task on the runtime that owns this `Call`.
     pub fn on_event(&mut self, handler: impl Fn(CallEvent) + Send + Sync + 'static) {
         let handler: EventHandler = Arc::new(handler);
         let stream_end_handler = handler.clone();
+        let rt_handle = tokio::runtime::Handle::current();
         self.ntg
             .on_stream_end(move |_chat_id, stream_type, device| {
-                stream_end_handler(CallEvent::StreamEnded(stream_type, device));
+                let stream_end_handler = stream_end_handler.clone();
+                let event = CallEvent::StreamEnded(stream_type, device);
+                // Hop back onto the Tokio runtime before running user code.
+                rt_handle.spawn(async move {
+                    stream_end_handler(event);
+                });
             });
         self.event_handler = Some(handler);
     }
@@ -324,12 +340,26 @@ impl Call {
             warn!("tgcalls: ntg stop error (ignored): {}", e);
         }
 
-        if let Some(call) = self.active_call.take() {
-            signaling::leave_call(&self.client, call, 0).await?;
-        }
+        let leave_result = match self.active_call.take() {
+            Some(call) => signaling::leave_call(&self.client, call, 0).await,
+            None => Ok(()),
+        };
 
+        // Reset unconditionally, even on a signaling failure: the media
+        // stream is already stopped above either way, and getting stuck in
+        // `Leaving` forever - unable to join() or leave() again - would be
+        // strictly worse than surfacing this error while still recovering.
         self.video_subs.lock().unwrap().clear();
         self.state = CallState::Idle;
+
+        if let Err(e) = leave_result {
+            warn!(
+                "tgcalls: leaveGroupCall signaling failed (state still reset, safe to retry): {}",
+                e
+            );
+            return Err(e);
+        }
+
         info!("tgcalls: left chat {}", self.chat_id);
         Ok(())
     }
@@ -388,8 +418,15 @@ impl Call {
             .as_ref()
             .ok_or(TgCallsError::NotJoined)?
             .clone();
-        signaling::leave_presentation(&self.client, call).await?;
+        let leave_result = signaling::leave_presentation(&self.client, call).await;
+
+        // Same reasoning as leave(): the ntg-level stop already happened
+        // above, so don't leave presentation_active stuck true on a
+        // signaling failure - that would incorrectly block a future
+        // join_presentation() until this is retried.
         self.presentation_active = false;
+
+        leave_result?;
         info!("tgcalls: presentation stopped in chat {}", self.chat_id);
         Ok(())
     }
