@@ -81,9 +81,10 @@ pub async fn create_group_call(
         })
         .await?;
 
-    extract_created_call(updates).ok_or_else(|| {
+    let (call, _invite_link) = extract_created_call(updates).ok_or_else(|| {
         TgCallsError::TransportParse("no GroupCall in createGroupCall response".into())
-    })
+    })?;
+    Ok(call)
 }
 
 /// `resolve_call`, but starts a voice chat first if none is active yet.
@@ -275,7 +276,6 @@ pub async fn get_user_access_hash(client: &Client, user_id: i64) -> Result<i64, 
     )))
 }
 
-#[allow(dead_code)]
 pub async fn get_self_user_id(client: &Client) -> Result<i64, TgCallsError> {
     let users = client
         .invoke(&tl::functions::users::GetUsers {
@@ -348,6 +348,190 @@ pub async fn discard_call(
     Ok(())
 }
 
+/// Extracts the slug from a conference deep link
+/// (`t.me/call/<slug>`/`https://t.me/call/<slug>` or `tg://call?slug=<slug>`,
+/// per <https://core.telegram.org/api/links#conference-links>). Returns
+/// `None` for anything else - not a validity check beyond shape, the slug
+/// itself is only proven valid once you actually join with it.
+pub fn parse_conference_link(link: &str) -> Option<String> {
+    let link = link.trim();
+    if let Some(rest) = link
+        .strip_prefix("tg://call?")
+        .or_else(|| link.strip_prefix("tg:call?"))
+    {
+        for pair in rest.split('&') {
+            if let Some(slug) = pair.strip_prefix("slug=") {
+                return Some(slug.to_string());
+            }
+        }
+        return None;
+    }
+    let without_scheme = link
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    for host in ["t.me/call/", "telegram.me/call/", "telegram.dog/call/"] {
+        if let Some(rest) = without_scheme.strip_prefix(host) {
+            let slug = rest.split(['?', '#']).next().unwrap_or(rest);
+            if !slug.is_empty() {
+                return Some(slug.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Starts a brand new E2E conference call. Returns the call handle, the
+/// join transport JSON, and the conference's invite link
+/// (`t.me/call/<slug>`) if the server sent one back - `groupCall.invite_link`
+/// comes for free with creation, no separate `exportGroupCallInvite` call
+/// needed for conferences (unlike classic video chats/livestreams, where
+/// that's the only way to get a link).
+pub async fn create_conference_call(
+    client: &Client,
+    payload: &str,
+    video_stopped: bool,
+    block: Vec<u8>,
+    public_key: [u8; 32],
+) -> Result<(tl::enums::InputGroupCall, String, Option<String>), TgCallsError> {
+    let random_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as i32)
+        .unwrap_or(0);
+
+    let updates = client
+        .invoke(&tl::functions::phone::CreateConferenceCall {
+            muted: false,
+            video_stopped,
+            join: true,
+            random_id,
+            public_key: Some(public_key),
+            block: Some(block),
+            params: Some(tl::enums::DataJson::DataJson(tl::types::DataJson {
+                data: payload.to_string(),
+            })),
+        })
+        .await?;
+
+    let (call, invite_link) = extract_created_call(updates.clone()).ok_or_else(|| {
+        TgCallsError::TransportParse("no GroupCall in createConferenceCall response".into())
+    })?;
+    let transport = extract_transport_json(updates, false).ok_or_else(|| {
+        TgCallsError::TransportParse(
+            "no GroupCallConnection in createConferenceCall response".into(),
+        )
+    })?;
+    Ok((call, transport, invite_link))
+}
+
+/// Rings `user_id` into an already-created conference (the "invite" step -
+/// without this the conference exists but nobody else is being called).
+pub async fn invite_conference_call_participant(
+    client: &Client,
+    call: tl::enums::InputGroupCall,
+    user_id: i64,
+    access_hash: i64,
+    video: bool,
+) -> Result<(), TgCallsError> {
+    client
+        .invoke(&tl::functions::phone::InviteConferenceCallParticipant {
+            video,
+            call,
+            user_id: tl::enums::InputUser::InputUser(tl::types::InputUser {
+                user_id,
+                access_hash,
+            }),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Joins (or rejoins - e.g. after a P2P->conference migration) an existing
+/// conference given the block/public_key from `init_conference`. Returns
+/// the transport JSON plus any chain blocks Telegram piggy-backed on the
+/// join response itself (common when you're behind on the chain).
+pub async fn join_conference_call(
+    client: &Client,
+    call: tl::enums::InputGroupCall,
+    payload: &str,
+    video_stopped: bool,
+    block: Vec<u8>,
+    public_key: [u8; 32],
+) -> Result<(String, Option<tl::types::UpdateGroupCallChainBlocks>), TgCallsError> {
+    let updates = client
+        .invoke(&tl::functions::phone::JoinGroupCall {
+            muted: false,
+            video_stopped,
+            call,
+            join_as: tl::enums::InputPeer::PeerSelf,
+            invite_hash: None,
+            public_key: Some(public_key),
+            block: Some(block),
+            params: tl::enums::DataJson::DataJson(tl::types::DataJson {
+                data: payload.to_string(),
+            }),
+        })
+        .await?;
+
+    let chain_blocks = extract_chain_blocks(&updates);
+    let transport = extract_transport_json(updates, false).ok_or_else(|| {
+        TgCallsError::TransportParse(
+            "no GroupCallConnection in joinGroupCall(conference) response".into(),
+        )
+    })?;
+    Ok((transport, chain_blocks))
+}
+
+/// Relays a block you produced (`NTgCalls::on_outbound_block`) to every
+/// other participant via the server.
+pub async fn send_conference_call_broadcast(
+    client: &Client,
+    call: tl::enums::InputGroupCall,
+    block: Vec<u8>,
+) -> Result<(), TgCallsError> {
+    client
+        .invoke(&tl::functions::phone::SendConferenceCallBroadcast { call, block })
+        .await?;
+    Ok(())
+}
+
+/// Fetches a range of blocks for one subchain - used both to answer
+/// `NTgCalls::on_subchain_request` (catching up after a short poll) and to
+/// fetch just the last block for a P2P->conference migration
+/// (`sub_chain_id: 0, offset: -1, limit: 1`).
+pub async fn get_conference_chain_blocks(
+    client: &Client,
+    call: tl::enums::InputGroupCall,
+    sub_chain_id: i32,
+    offset: i32,
+    limit: i32,
+) -> Result<Option<tl::types::UpdateGroupCallChainBlocks>, TgCallsError> {
+    let updates = client
+        .invoke(&tl::functions::phone::GetGroupCallChainBlocks {
+            call,
+            sub_chain_id,
+            offset,
+            limit,
+        })
+        .await?;
+    Ok(extract_chain_blocks(&updates))
+}
+
+fn extract_chain_blocks(
+    updates: &tl::enums::Updates,
+) -> Option<tl::types::UpdateGroupCallChainBlocks> {
+    let list: &[tl::enums::Update] = match updates {
+        tl::enums::Updates::Updates(u) => &u.updates,
+        tl::enums::Updates::Combined(u) => &u.updates,
+        _ => return None,
+    };
+    for upd in list {
+        if let tl::enums::Update::GroupCallChainBlocks(cb) = upd {
+            return Some(cb.clone());
+        }
+    }
+    None
+}
+
 fn extract_access_hash(chats: Vec<tl::enums::Chat>) -> Result<i64, TgCallsError> {
     for chat in chats {
         if let tl::enums::Chat::Channel(ch) = chat {
@@ -374,7 +558,9 @@ fn extract_transport_json(updates: tl::enums::Updates, presentation: bool) -> Op
     None
 }
 
-fn extract_created_call(updates: tl::enums::Updates) -> Option<tl::enums::InputGroupCall> {
+fn extract_created_call(
+    updates: tl::enums::Updates,
+) -> Option<(tl::enums::InputGroupCall, Option<String>)> {
     let list = match updates {
         tl::enums::Updates::Updates(u) => u.updates,
         tl::enums::Updates::Combined(u) => u.updates,
@@ -383,12 +569,11 @@ fn extract_created_call(updates: tl::enums::Updates) -> Option<tl::enums::InputG
     for upd in list {
         if let tl::enums::Update::GroupCall(u) = upd {
             if let tl::enums::GroupCall::GroupCall(gc) = u.call {
-                return Some(tl::enums::InputGroupCall::InputGroupCall(
-                    tl::types::InputGroupCall {
-                        id: gc.id,
-                        access_hash: gc.access_hash,
-                    },
-                ));
+                let call = tl::enums::InputGroupCall::InputGroupCall(tl::types::InputGroupCall {
+                    id: gc.id,
+                    access_hash: gc.access_hash,
+                });
+                return Some((call, gc.invite_link));
             }
         }
     }

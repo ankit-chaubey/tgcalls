@@ -35,7 +35,7 @@ pub enum ParticipantAction {
     Updated,
 }
 
-/// Everything a bot might want to react to about this call, beyond the
+/// Everything a client might want to react to about this call, beyond the
 /// return values of `Call`'s own methods.
 #[derive(Debug, Clone)]
 pub enum CallEvent {
@@ -106,7 +106,7 @@ fn is_transient(err: &TgCallsError) -> bool {
         || msg.contains("CONNECTION")
 }
 
-fn peer_user_id(peer: &tl::enums::Peer) -> Option<i64> {
+pub(crate) fn peer_user_id(peer: &tl::enums::Peer) -> Option<i64> {
     match peer {
         tl::enums::Peer::User(u) => Some(u.user_id),
         _ => None,
@@ -140,7 +140,7 @@ fn to_ssrc_groups(groups: &[tl::enums::GroupCallParticipantVideoSourceGroup]) ->
 
 // Telegram supergroup IDs come in as -100xxxxxxxxxx; strip the -100 prefix
 // to get the raw channel_id that ntgcalls expects.
-fn ntg_chat_id(chat_id: i64) -> i64 {
+pub(crate) fn ntg_chat_id(chat_id: i64) -> i64 {
     if chat_id < 0 {
         let abs = -chat_id;
         if abs > 1_000_000_000_000 {

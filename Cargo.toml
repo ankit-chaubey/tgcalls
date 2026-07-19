@@ -60,6 +60,14 @@ path = "examples/queue_calls.rs"
 name = "simple_calls"
 path = "examples/simple_calls.rs"
 
+[[example]]
+name = "conference_calls"
+path = "examples/conference_calls.rs"
+
+[[example]]
+name = "conference_calls_managed"
+path = "examples/conference_calls_managed.rs"
+
 [dependencies]
 ferogram   = "0.6.4"
 ntgcalls   = "=3.0.0-beta13"
