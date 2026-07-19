@@ -9,7 +9,7 @@ documentation   = "https://docs.rs/tgcalls"
 homepage        = "https://github.com/ankit-chaubey/tgcalls"
 repository      = "https://github.com/ankit-chaubey/tgcalls"
 readme          = "README.md"
-keywords        = ["telegram", "tgcalls", "ntgcalls", "webrtc", "voip", "ferogram"]
+keywords        = ["telegram", "tgcalls", "ntgcalls", "webrtc", "voip"]
 categories      = ["api-bindings", "multimedia"]
 
 [lib]
