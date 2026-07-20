@@ -127,7 +127,7 @@ pub enum ConferenceTarget {
     /// existing conference already linked to this chat. `None` for a fresh
     /// join with no chain history yet; `Some(last_block)` to resume from
     /// where you left off (get one via
-    /// [`crate::signaling::get_conference_chain_blocks`] with
+    /// `signaling::get_conference_chain_blocks` with
     /// `sub_chain_id: 0, offset: -1, limit: 1`).
     ///
     /// This resolves the conference via `chat_id` - correct when you're
@@ -138,7 +138,7 @@ pub enum ConferenceTarget {
     Join { last_block: Option<Vec<u8>> },
     /// Join using a conference deep link (`t.me/call/<slug>` /
     /// `tg://call?slug=<slug>`) - parse one with
-    /// [`crate::signaling::parse_conference_link`]. Doesn't require being
+    /// [`crate::parse_conference_link`]. Doesn't require being
     /// a member of any particular chat; the slug alone identifies the
     /// conference.
     JoinBySlug {
@@ -740,11 +740,6 @@ async fn start_conference(
         .await?;
     let public_key = public_key_array(&params.public_key)?;
 
-    if let Some(media) = &media {
-        ntg.set_stream_sources(ntg_id, StreamMode::Capture, media)
-            .await?;
-    }
-
     let (tx, rx) = oneshot::channel();
     *connect_slot.lock().unwrap() = Some(tx);
 
@@ -816,7 +811,19 @@ async fn start_conference(
     };
 
     ntg.connect(ntg_id, &transport_json, false).await?;
+    // connect() only dispatches the SDP; Connected arrives via the
+    // connect_slot callback. set_stream_sources has to come after this,
+    // not before - configuring a media source before the transport exists
+    // silently doesn't work (ntgcalls doesn't buffer/replay it once the
+    // connection later comes up). Matches the proven order in
+    // Call::try_join, which does connect -> await Connected -> THEN
+    // set_stream_sources for exactly this reason.
     rx.await.expect("connection callback never fired")?;
+
+    if let Some(media) = &media {
+        ntg.set_stream_sources(ntg_id, StreamMode::Capture, media)
+            .await?;
+    }
 
     Ok((call, invite_link))
 }

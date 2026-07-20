@@ -43,10 +43,10 @@ pub use e2e::{
     incoming_conference_call, migrate_from_p2p, ConferenceCall, ConferenceCalls, ConferenceEvent,
     ConferenceInvite, ConferenceState, ConferenceTarget,
 };
-pub use signaling::parse_conference_link;
 pub use error::TgCallsError;
 pub use media::{auto_media, auto_media_at, probe_duration, Media};
 pub use p2p::{P2PCall, P2PCallState, P2PEvent};
+pub use signaling::parse_conference_link;
 
 pub use ntgcalls::{
     AudioDescription, AuthParams, CallType, ConnectionMode, DeviceInfo, DhConfig, FrameData,
