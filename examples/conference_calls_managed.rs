@@ -1,12 +1,21 @@
 // Same scenario as conference_calls.rs (start a conference, ring someone,
 // stream audio) but through the `ConferenceCalls` manager instead of a raw
 // `ConferenceCall` - the manager auto-routes UpdateGroupCallChainBlocks via
-// Dispatcher middleware, so there's no manual update-stream loop here.
-// Worth comparing the two examples side by side: this is what you get once
-// you're running more than one chat's conference and don't want to wire
-// the chain-block relay by hand for each one.
+// Dispatcher middleware, so there's no manual update-stream loop for that
+// part. Worth comparing the two examples side by side: this is what you
+// get once you're running more than one chat's conference and don't want
+// to wire the chain-block relay by hand for each one.
+//
+// Same deferred-play as conference_calls.rs: `create()` with `media: None`,
+// then `play()` once `ConferenceEvent::ParticipantsChanged` fires for this
+// chat. See that file for why - the short version is the invitee can't
+// decrypt anything sent before they've actually joined and the chain has
+// rekeyed to include them.
 //
 // usage: conference_calls_managed <chat_id> <invitee_user_id> <audio_file>
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use ferogram::filters::Dispatcher;
 use tgcalls::{incoming_conference_call, ConferenceCalls, ConferenceEvent, Media};
@@ -37,15 +46,29 @@ async fn main() -> anyhow::Result<()> {
 
     let mut stream = client.stream_updates();
 
+    // Fires once, the first time the invitee joins this chat's conference
+    // - see the file header for why we wait on this before playing.
+    let (joined_tx, mut joined_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let already_signaled = Arc::new(AtomicBool::new(false));
+
     let conferences = ConferenceCalls::new(client);
-    conferences.on_event(|chat_id, event| match event {
-        ConferenceEvent::FingerprintUpdated(emoji) => {
-            println!("[{chat_id}] verification emoji: {emoji}");
+    conferences.on_event({
+        let already_signaled = already_signaled.clone();
+        let joined_tx = joined_tx.clone();
+        move |event_chat_id, event| match event {
+            ConferenceEvent::FingerprintUpdated(emoji) => {
+                println!("[{event_chat_id}] verification emoji: {emoji}");
+            }
+            ConferenceEvent::StreamEnded(..) => println!("[{event_chat_id}] stream ended"),
+            ConferenceEvent::Left => println!("[{event_chat_id}] left the conference"),
+            ConferenceEvent::ParticipantsChanged => {
+                println!("[{event_chat_id}] participants changed");
+                if event_chat_id == chat_id && !already_signaled.swap(true, Ordering::SeqCst) {
+                    let _ = joined_tx.try_send(());
+                }
+            }
+            _ => {}
         }
-        ConferenceEvent::StreamEnded(..) => println!("[{chat_id}] stream ended"),
-        ConferenceEvent::Left => println!("[{chat_id}] left the conference"),
-        ConferenceEvent::ParticipantsChanged => println!("[{chat_id}] participants changed"),
-        _ => {}
     });
 
     // Chain blocks arrive as ordinary updates - the manager's Middleware
@@ -74,10 +97,13 @@ async fn main() -> anyhow::Result<()> {
     });
 
     println!("starting conference and ringing {invitee}...");
-    conferences
-        .create(chat_id, vec![invitee], Some(Media::audio(&path)))
-        .await?;
-    println!("conference joined, streaming {path}");
+    conferences.create(chat_id, vec![invitee], None).await?;
+    println!("conference created, ringing {invitee} - not streaming yet");
+
+    println!("waiting for {invitee} to actually join before streaming (Ctrl+C to give up)...");
+    joined_rx.recv().await;
+    conferences.play(chat_id, Media::audio(&path)).await?;
+    println!("{invitee} joined, now streaming {path}");
 
     println!("press Enter to hang up.");
     let mut input = String::new();
