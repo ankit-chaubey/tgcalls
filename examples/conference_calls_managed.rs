@@ -1,16 +1,12 @@
 // Same scenario as conference_calls.rs (start a conference, ring someone,
-// stream audio) but through the `ConferenceCalls` manager instead of a raw
-// `ConferenceCall` - the manager auto-routes UpdateGroupCallChainBlocks via
-// Dispatcher middleware, so there's no manual update-stream loop for that
-// part. Worth comparing the two examples side by side: this is what you
-// get once you're running more than one chat's conference and don't want
-// to wire the chain-block relay by hand for each one.
+// stream audio), but through the `ConferenceCalls` manager instead of a raw
+// `ConferenceCall`. The manager routes chain blocks for you via Dispatcher
+// middleware, so there's no manual relay loop to write - handy once you're
+// juggling more than one chat's conference at a time.
 //
-// Same deferred-play as conference_calls.rs: `create()` with `media: None`,
-// then `play()` once `ConferenceEvent::ParticipantsChanged` fires for this
-// chat. See that file for why - the short version is the invitee can't
-// decrypt anything sent before they've actually joined and the chain has
-// rekeyed to include them.
+// We still wait for `ConferenceEvent::ParticipantsChanged` before playing,
+// same as the other example: the invitee can't decrypt anything sent
+// before they've joined and the chain has rekeyed to include them.
 //
 // usage: conference_calls_managed <chat_id> <invitee_user_id> <audio_file>
 
@@ -46,8 +42,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut stream = client.stream_updates();
 
-    // Fires once, the first time the invitee joins this chat's conference
-    // - see the file header for why we wait on this before playing.
+    // Fires once, the first time the invitee joins this chat's conference.
     let (joined_tx, mut joined_rx) = tokio::sync::mpsc::channel::<()>(1);
     let already_signaled = Arc::new(AtomicBool::new(false));
 
@@ -71,14 +66,12 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Chain blocks arrive as ordinary updates - the manager's Middleware
-    // impl auto-routes them to whichever tracked chat they belong to. A
-    // real client would register this once and never think about it again;
-    // shown explicitly here since this example has nothing else running
-    // the dispatcher. Incoming conference invites (a `MessageActionConferenceCall`
-    // system message, not a call-specific update) are checked here too -
-    // `incoming_conference_call` never touches `ConferenceCalls` itself,
-    // it just tells you one exists; joining is still your call.
+    // Chain blocks arrive as ordinary updates, and the manager's Middleware
+    // impl routes them to whichever tracked chat they belong to - register
+    // it once and forget about it. We also check for incoming conference
+    // invites here (a `MessageActionConferenceCall` system message):
+    // `incoming_conference_call` just tells you one exists, it's still up
+    // to you whether to join.
     let mut dp = Dispatcher::new();
     dp.middleware(conferences.clone());
     let dispatch = tokio::spawn(async move {
@@ -88,9 +81,9 @@ async fn main() -> anyhow::Result<()> {
                     "[{}] conference invite (call_id {}, active: {}, missed: {})",
                     invite.chat_id, invite.call_id, invite.active, invite.missed
                 );
-                // Not auto-joining here - see migrate_from_p2p in
-                // CONFERENCE_CALLS.md for the P2P-upgrade case, and
-                // ConferenceCalls::join for actually joining one of these.
+                // Not auto-joining here - see ConferenceCalls::join to
+                // actually join one of these, or migrate_from_p2p if
+                // you're upgrading an existing P2P call instead.
             }
             dp.dispatch(upd).await;
         }

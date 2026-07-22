@@ -6,34 +6,26 @@
 //! opaque blocks between participants instead of broadcasting a
 //! participant list.
 //!
-//! Ported from pytgcalls' conference flow (`_connect_call`,
-//! `_handle_subchain_request`, `_handle_request_participants`,
-//! `start.py`'s callback wiring) - same sequence of `phone.*` calls, same
-//! callbacks, just typed and run through an actor instead of
-//! `asyncio.run_coroutine_threadsafe`.
-//!
 //! # Why this is its own actor, not just another `Call` method
 //!
 //! `ntgcalls::NTgCalls` is `Send` but deliberately not `Sync` (see the
-//! comment at the top of `calls.rs`). That's manageable for a plain
-//! stream-end notification - forward it and move on. It's not manageable
-//! here: answering `on_subchain_request` means doing a `phone.*` RPC and
-//! *then* calling back into `ntg.apply_blocks(...)` and
-//! `ntg.finish_subchain_request(...)`, and answering `on_request_participants`
-//! means an RPC followed by `ntg.update_audio_ssrc_mappings(...)`. Doing
-//! that from a `tokio::spawn`ed task would need a `Send` future holding a
-//! live `&NTgCalls`, which doesn't exist because `NTgCalls: !Sync`.
+//! comment at the top of `calls.rs`). That's fine for a plain stream-end
+//! notification - forward it and move on. It's trickier here: answering
+//! `on_subchain_request` means doing a `phone.*` RPC and then calling back
+//! into `ntg.apply_blocks(...)` and `ntg.finish_subchain_request(...)`, and
+//! answering `on_request_participants` means an RPC followed by
+//! `ntg.update_audio_ssrc_mappings(...)`. A plain `tokio::spawn`ed task
+//! can't hold a live `&NTgCalls` across an await, since `NTgCalls: !Sync`.
 //!
 //! So [`ConferenceCall`] runs its own dedicated thread with its own
-//! current-thread runtime, exactly like `calls.rs`'s `Worker`. Every raw
-//! ntgcalls callback (`on_outbound_block`, `on_subchain_request`,
-//! `on_request_participants`, `on_update_emojis`, `on_stream_end`) does
-//! nothing but push a [`Command`] onto that same actor's channel - no
-//! awaiting, no ntg calls, no user code, so it's safe to call from
-//! ntgcalls' native WebRTC thread. The receive loop is the one place that
-//! owns `ntg` and has a real Tokio context, so it does the actual
-//! RPC-then-ntg-call work inline, sequentially, never crossing a `Send`
-//! boundary.
+//! current-thread runtime, the same way `calls.rs`'s `Worker` does. Every
+//! raw ntgcalls callback (`on_outbound_block`, `on_subchain_request`,
+//! `on_request_participants`, `on_update_emojis`, `on_stream_end`) just
+//! pushes a [`Command`] onto that actor's channel - no awaiting, no ntg
+//! calls, no user code, so it's safe to call from ntgcalls' native WebRTC
+//! thread. The receive loop is the one place that owns `ntg` and has a
+//! real Tokio context, so it's the only place doing the actual
+//! RPC-then-ntg-call work, one step at a time.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -728,11 +720,11 @@ async fn start_conference(
     // connection slot registered - it either migrates an existing P2PCall
     // in place or (for anything else already there) just replaces it, but
     // either way `exists(chat_id)` has to be true first, or it throws
-    // `ConnectionNotFound`. Since `ConferenceCall` always starts from a
-    // brand new `NTgCalls` with nothing registered yet, that slot never
-    // exists on its own - reserve it the same way pytgcalls does
-    // (`create_p2p_call` right before `init_conference`, not `create_call`;
-    // conference join intentionally goes through the P2P-call code path).
+    // `ConnectionNotFound`. `ConferenceCall` always starts from a brand new
+    // `NTgCalls` with nothing registered yet, so we reserve that slot
+    // ourselves with `create_p2p_call` right before `init_conference` -
+    // conference join intentionally goes through the P2P-call code path,
+    // not `create_call`.
     ntg.create_p2p_call(ntg_id).await?;
     let my_id = signaling::get_self_user_id(client).await?;
     let params = ntg
@@ -1108,9 +1100,9 @@ impl Middleware for ConferenceCalls {
 ///
 /// Resolving the conference (`signaling::resolve_call`) relies on
 /// Telegram having already linked the new group call to the chat by the
-/// time this runs, same assumption pytgcalls' `get_conference_last_block`
-/// makes - it's not special-cased through the migration slug, just the
-/// normal chat-linked-call lookup every other conference join uses.
+/// time this runs - it's not special-cased through the migration slug,
+/// just the normal chat-linked-call lookup every other conference join
+/// uses.
 pub async fn migrate_from_p2p(
     client: &ferogram::Client,
     conferences: &ConferenceCalls,
@@ -1176,9 +1168,8 @@ impl ConferenceInvite {
 /// Extracts a [`ConferenceInvite`] from an update, if it's a
 /// `MessageActionConferenceCall` system message. Returns `None` for every
 /// other update, so it's safe to call unconditionally on your update
-/// stream - same shape as `incoming_conference_call(update).map(...)`
-/// alongside your other per-update checks. Nothing here decides whether to
-/// join; that's app logic, same as pytgcalls leaves it to you.
+/// stream alongside your other per-update checks. Nothing here decides
+/// whether to join - that's up to your app.
 ///
 /// ```rust,no_run
 /// # use tgcalls::{incoming_conference_call, ConferenceCalls};

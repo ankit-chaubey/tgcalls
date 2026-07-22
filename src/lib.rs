@@ -22,10 +22,8 @@
 //!
 //! - **Automatic reconnection** - if the network degrades, [`Call`] doesn't
 //!   silently retry or fall back to a relay for you. [`Call::connection_mode`]
-//!   tells you if you've dropped to relay mode so you can react; this
-//!   crate won't do it for you. Worth noting: pytgcalls doesn't do this
-//!   either, so this was never actually a parity gap - just a limit worth
-//!   knowing about either way.
+//!   tells you if you've dropped to relay mode so you can react to it
+//!   yourself.
 
 mod call;
 mod calls;

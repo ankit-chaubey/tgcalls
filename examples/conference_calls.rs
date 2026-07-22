@@ -1,21 +1,17 @@
 // Starts a brand-new E2E conference call, rings one user into it, streams
 // an audio file, and prints the verification emoji once ntgcalls has it.
 //
-// Media isn't sent until the invitee has actually joined. A conference's
-// shared key only covers whoever's currently in the chain, so anything
-// sent before the invitee joins gets encrypted against a key they can't
-// derive yet and just never decrypts on their end - `Session::encrypt`
-// doesn't error on this, it just produces ciphertext nobody can read. The
-// fingerprint emoji reflects your own key state, not theirs, so it's not
-// a signal to go by either. `ConferenceEvent::ParticipantsChanged` is what
-// tells you someone actually joined at the WebRTC level - wait for that,
-// then play.
+// We hold off on playing anything until the invitee has actually joined -
+// the conference's shared key only covers participants currently in the
+// chain, so audio sent too early would just encrypt to a key they can't
+// derive yet. `ConferenceEvent::ParticipantsChanged` is the signal that
+// someone joined at the WebRTC level, so we wait for that before calling
+// `play`.
 //
-// Also relays `UpdateGroupCallChainBlocks` off the raw update stream back
-// into the conference, since that's what lets the E2E chain make progress
-// as the other participant sends their own blocks. Same idea as `Calls`'
-// `route_update` for classic group calls, just a different update type -
-// done by hand here since `ConferenceCall` isn't wrapped by `Calls`.
+// We also relay `UpdateGroupCallChainBlocks` from the raw update stream
+// back into the conference - that's what lets the E2E chain move forward
+// as the other side sends its own blocks. `ConferenceCall` isn't wrapped
+// by `Calls`, so we wire this by hand here.
 //
 // usage: conference_calls <chat_id> <invitee_user_id> <audio_file>
 
@@ -50,8 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut stream = client.stream_updates();
 
-    // Fires once, the first time the invitee actually joins - see the
-    // file header for why we wait on this before playing anything.
+    // Fires once, the first time the invitee actually joins.
     let (joined_tx, mut joined_rx) = tokio::sync::mpsc::channel::<()>(1);
     let already_signaled = Arc::new(AtomicBool::new(false));
 
@@ -70,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
                     let _ = joined_tx.try_send(());
                 }
             }
-            // Frames/RemoteSourceChanged omitted here - see the module docs on
-            // ConferenceEvent::Frames if you want to capture/record a call.
+            // Not handling Frames/RemoteSourceChanged here - see the docs on
+            // ConferenceEvent::Frames if you want to capture or record a call.
             _ => {}
         }
     }));
