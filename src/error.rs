@@ -28,4 +28,7 @@ pub enum TgCallsError {
 
     #[error("this chat's call worker thread is gone (panicked or already torn down)")]
     WorkerGone,
+
+    #[error("too many concurrent calls active (limit: {0}) - leave one before joining another")]
+    TooManyConcurrentCalls(usize),
 }

@@ -8,6 +8,9 @@
 //! way around this other than the standard fix for a `Send`-not-`Sync`
 //! resource: give each chat's `Call` a dedicated thread that owns it for
 //! life, and talk to it only through channels. That's what this file is.
+//! [`Calls::with_concurrency_limit`] caps how many of those threads can
+//! exist at once, for anyone running enough chats that this starts to
+//! matter.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,8 +22,8 @@ use ferogram::Update;
 use ntgcalls::{CallType, ConnectionMode, MediaDescription, StreamMode};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::media::{auto_media_at, probe_duration};
-use crate::{auto_media, error::TgCallsError, Call, CallEvent};
+use crate::media::{auto_media_at_probed, auto_media_probed};
+use crate::{error::TgCallsError, Call, CallEvent};
 
 type EventHandler = Arc<dyn Fn(i64, CallEvent) + Send + Sync>;
 type Reply<T> = oneshot::Sender<Result<T, TgCallsError>>;
@@ -280,6 +283,7 @@ pub struct Calls {
     client: ferogram::Client,
     active: Arc<tokio::sync::Mutex<HashMap<i64, Worker>>>,
     event_handler: Arc<std::sync::Mutex<Option<EventHandler>>>,
+    max_concurrent: Option<usize>,
 }
 
 impl Calls {
@@ -288,6 +292,21 @@ impl Calls {
             client,
             active: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             event_handler: Arc::new(std::sync::Mutex::new(None)),
+            max_concurrent: None,
+        }
+    }
+
+    /// Same as [`Calls::new`], but caps how many chats can have an active
+    /// worker thread at once. Each tracked chat gets its own OS thread and
+    /// Tokio runtime (see the module docs) - fine at tens or low hundreds
+    /// of concurrent calls, but unbounded growth isn't free at very high
+    /// counts. `play`/`seek`/`record` return
+    /// [`TgCallsError::TooManyConcurrentCalls`] instead of starting a new
+    /// worker once the limit is hit; chats already active are unaffected.
+    pub fn with_concurrency_limit(client: ferogram::Client, max_concurrent: usize) -> Self {
+        Self {
+            max_concurrent: Some(max_concurrent),
+            ..Self::new(client)
         }
     }
 
@@ -299,15 +318,28 @@ impl Calls {
         *self.event_handler.lock().unwrap() = Some(Arc::new(handler));
     }
 
-    async fn get_or_create(&self, chat_id: i64) -> Worker {
-        let mut active = self.active.lock().await;
-        if let Some(worker) = active.get(&chat_id) {
-            return worker.clone();
+    async fn get_or_create(&self, chat_id: i64) -> Result<Worker, TgCallsError> {
+        if let Some(worker) = self.active.lock().await.get(&chat_id) {
+            return Ok(worker.clone());
         }
+
+        if let Some(max) = self.max_concurrent {
+            if self.active.lock().await.len() >= max {
+                return Err(TgCallsError::TooManyConcurrentCalls(max));
+            }
+        }
+
+        // Spawned outside the lock: starting a worker (an OS thread plus
+        // its own Tokio runtime) shouldn't hold up lookups for every other
+        // chat while it happens. If two callers race for the same
+        // chat_id, the loser's worker is simply dropped here - its thread
+        // exits on its own once the sender goes away, since nothing was
+        // ever joined on it yet.
         let handler = self.event_handler.lock().unwrap().clone();
         let worker = Worker::spawn(self.client.clone(), chat_id, handler);
-        active.insert(chat_id, worker.clone());
-        worker
+
+        let mut active = self.active.lock().await;
+        Ok(active.entry(chat_id).or_insert(worker).clone())
     }
 
     async fn get(&self, chat_id: i64) -> Result<Worker, TgCallsError> {
@@ -326,17 +358,9 @@ impl Calls {
     /// auto-starting) use [`Call`] directly.
     pub async fn play(&self, chat_id: i64, source: impl Into<String>) -> Result<(), TgCallsError> {
         let source = source.into();
-        // auto_media/probe_duration shell out to ffprobe synchronously (up
-        // to PROBE_TIMEOUT) - keep that off whatever runtime thread called
-        // us, not just off the worker's.
-        let (media, duration) = tokio::task::spawn_blocking({
-            let source = source.clone();
-            move || (auto_media(&source, 1280, 720, 30), probe_duration(&source))
-        })
-        .await
-        .expect("tgcalls: media probe task panicked");
+        let (media, duration) = auto_media_probed(&source, 1280, 720, 30).await;
 
-        let worker = self.get_or_create(chat_id).await;
+        let worker = self.get_or_create(chat_id).await?;
         worker.send(|r| Command::Play(media, duration, r)).await
     }
 
@@ -352,19 +376,9 @@ impl Calls {
         offset: Duration,
     ) -> Result<(), TgCallsError> {
         let source = source.into();
-        let (media, duration) = tokio::task::spawn_blocking({
-            let source = source.clone();
-            move || {
-                (
-                    auto_media_at(&source, offset, 1280, 720, 30),
-                    probe_duration(&source),
-                )
-            }
-        })
-        .await
-        .expect("tgcalls: media probe task panicked");
+        let (media, duration) = auto_media_at_probed(&source, offset, 1280, 720, 30).await;
 
-        let worker = self.get_or_create(chat_id).await;
+        let worker = self.get_or_create(chat_id).await?;
         worker
             .send(|r| Command::Seek(media, duration, offset, r))
             .await
@@ -374,7 +388,7 @@ impl Calls {
     /// `record_screen`), joining silently first if not already in the call.
     pub async fn record(&self, chat_id: i64, media: MediaDescription) -> Result<(), TgCallsError> {
         self.get_or_create(chat_id)
-            .await
+            .await?
             .send(|r| Command::Record(media, r))
             .await
     }

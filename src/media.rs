@@ -13,63 +13,184 @@ use ntgcalls::{
 
 use crate::error::TgCallsError;
 
-/// Checks whether `path` has at least one stream of the given ffprobe
-/// selector (`"v"` for video, `"a"` for audio). Returns `false` if ffprobe
-/// is missing, times out, or the source has no such stream.
-fn has_stream(path: &str, selector: &str) -> bool {
-    let Ok(child) = Command::new("ffprobe")
+/// What one `ffprobe` pass tells us about a source: which stream types are
+/// present, and its total duration if it has one. `auto_media`/`auto_media_at`
+/// used to need two `has_stream` calls each, plus `Calls::play`/`seek` ran
+/// a third probe for duration on top of that - three process spawns for
+/// one `play()`. This gets everything in a single call.
+struct Probed {
+    has_video: bool,
+    has_audio: bool,
+    duration: Option<Duration>,
+}
+
+/// Runs `ffprobe` on `path` and waits on it asynchronously via Tokio's
+/// process reactor - no polling loop, no blocking thread. `kill_on_drop`
+/// means a timeout actually kills the process instead of leaving it
+/// running past our own wait.
+async fn probe(path: &str) -> Probed {
+    let empty = || Probed {
+        has_video: false,
+        has_audio: false,
+        duration: None,
+    };
+
+    let Ok(child) = tokio::process::Command::new("ffprobe")
         .args([
             "-v",
             "error",
-            "-select_streams",
-            selector,
             "-show_entries",
-            "stream=index",
+            "stream=codec_type:format=duration",
             "-of",
-            "csv=p=0",
+            "default=noprint_wrappers=1",
             path,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
     else {
-        return false;
+        return empty();
     };
 
-    match run_with_timeout(child, PROBE_TIMEOUT) {
-        Some(output) => output.status.success() && !output.stdout.is_empty(),
-        None => false,
+    let Ok(Ok(output)) = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output()).await else {
+        return empty();
+    };
+    if !output.status.success() {
+        return empty();
     }
+
+    let mut probed = empty();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(codec_type) = line.strip_prefix("codec_type=") {
+            match codec_type {
+                "video" => probed.has_video = true,
+                "audio" => probed.has_audio = true,
+                _ => {}
+            }
+        } else if let Some(secs) = line
+            .strip_prefix("duration=")
+            .and_then(|s| s.parse::<f64>().ok())
+        {
+            if secs.is_finite() && secs > 0.0 {
+                probed.duration = Some(Duration::from_secs_f64(secs));
+            }
+        }
+    }
+    probed
 }
 
-/// Builds a [`MediaDescription`] for `source`, probing it to pick
-/// audio-only vs audio+video. `width`/`height`/`fps` bound the video.
-pub fn auto_media(source: &str, width: i16, height: i16, fps: u8) -> MediaDescription {
-    let has_video = has_stream(source, "v");
-    let has_audio = has_stream(source, "a");
-    match (has_video, has_audio) {
+fn media_for(
+    source: &str,
+    video: bool,
+    audio: bool,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> MediaDescription {
+    match (video, audio) {
         (true, true) => Media::av(source, source, width, height, fps),
         (true, false) => Media::video(source, width, height, fps),
         _ => Media::audio(source),
     }
 }
 
+fn media_for_at(
+    source: &str,
+    offset: Duration,
+    video: bool,
+    audio: bool,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> MediaDescription {
+    match (video, audio) {
+        (true, true) => Media::av_at(source, source, offset, width, height, fps),
+        (true, false) => Media::video_at(source, offset, width, height, fps),
+        _ => Media::audio_at(source, offset),
+    }
+}
+
+/// Builds a [`MediaDescription`] for `source`, probing it to pick
+/// audio-only vs audio+video. `width`/`height`/`fps` bound the video.
+pub async fn auto_media(source: &str, width: i16, height: i16, fps: u8) -> MediaDescription {
+    let probed = probe(source).await;
+    media_for(
+        source,
+        probed.has_video,
+        probed.has_audio,
+        width,
+        height,
+        fps,
+    )
+}
+
 /// Like [`auto_media`], starting at `offset` into the source. Used by
 /// [`crate::Calls::seek`].
-pub fn auto_media_at(
+pub async fn auto_media_at(
     source: &str,
     offset: Duration,
     width: i16,
     height: i16,
     fps: u8,
 ) -> MediaDescription {
-    let has_video = has_stream(source, "v");
-    let has_audio = has_stream(source, "a");
-    match (has_video, has_audio) {
-        (true, true) => Media::av_at(source, source, offset, width, height, fps),
-        (true, false) => Media::video_at(source, offset, width, height, fps),
-        _ => Media::audio_at(source, offset),
-    }
+    let probed = probe(source).await;
+    media_for_at(
+        source,
+        offset,
+        probed.has_video,
+        probed.has_audio,
+        width,
+        height,
+        fps,
+    )
+}
+
+/// Like [`auto_media`], but returns the probed duration alongside the
+/// media - one `ffprobe` pass covers both instead of two separate calls.
+/// What [`crate::Calls::play`] actually uses.
+pub async fn auto_media_probed(
+    source: &str,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> (MediaDescription, Option<Duration>) {
+    let probed = probe(source).await;
+    (
+        media_for(
+            source,
+            probed.has_video,
+            probed.has_audio,
+            width,
+            height,
+            fps,
+        ),
+        probed.duration,
+    )
+}
+
+/// Like [`auto_media_at`], but returns the probed duration alongside the
+/// media. What [`crate::Calls::seek`] actually uses.
+pub async fn auto_media_at_probed(
+    source: &str,
+    offset: Duration,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> (MediaDescription, Option<Duration>) {
+    let probed = probe(source).await;
+    (
+        media_for_at(
+            source,
+            offset,
+            probed.has_video,
+            probed.has_audio,
+            width,
+            height,
+            fps,
+        ),
+        probed.duration,
+    )
 }
 
 pub struct Media;
@@ -111,30 +232,8 @@ fn run_with_timeout(
 
 /// Total duration of `path`, or `None` if ffprobe fails/times out or the
 /// source has no fixed length (a live stream, a device).
-pub fn probe_duration(path: &str) -> Option<Duration> {
-    let child = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            path,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-
-    let output = run_with_timeout(child, PROBE_TIMEOUT)?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let secs: f64 = text.trim().parse().ok()?;
-    (secs > 0.0 && secs.is_finite()).then(|| Duration::from_secs_f64(secs))
+pub async fn probe_duration(path: &str) -> Option<Duration> {
+    probe(path).await.duration
 }
 
 /// Reads the source's real width/height via ffprobe. Returns `None` if
@@ -200,6 +299,18 @@ fn resolve_dims(path: &str, width: i16, height: i16) -> (u32, u32) {
     }
 }
 
+/// Quotes `s` for safe interpolation into the shell command string
+/// `MediaSource::Shell` runs. ntgcalls executes this through a real shell
+/// (`boost::process::shell`, `/bin/sh -c` on POSIX) - Rust's `{:?}` debug
+/// formatting only escapes `"`/`\`/control characters, not shell
+/// metacharacters, so a path containing `$(...)` or backticks would still
+/// run as a subcommand. Single-quoting closes that off: nothing is special
+/// inside `'...'` except `'` itself, which gets closed, escaped, and
+/// reopened.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 fn audio_cmd(path: &str, offset: Duration) -> String {
     let reconnect = if needs_reconnect(path) {
         RECONNECT_FLAGS
@@ -207,12 +318,8 @@ fn audio_cmd(path: &str, offset: Duration) -> String {
         ""
     };
     let seek = seek_flag(offset);
-    format!(
-        "ffmpeg -v error {seek}{reconnect} -i {path:?} -vn -f s16le -ar 48000 -ac 2 pipe:1",
-        seek = seek,
-        reconnect = reconnect,
-        path = path,
-    )
+    let path = shell_quote(path);
+    format!("ffmpeg -v error {seek}{reconnect} -i {path} -vn -f s16le -ar 48000 -ac 2 pipe:1")
 }
 
 fn video_cmd(path: &str, w: u32, h: u32, fps: u8, offset: Duration) -> String {
@@ -222,12 +329,10 @@ fn video_cmd(path: &str, w: u32, h: u32, fps: u8, offset: Duration) -> String {
         ""
     };
     let seek = seek_flag(offset);
+    let path = shell_quote(path);
     format!(
-        "ffmpeg -v error {seek}{reconnect} -i {path:?} -an -f rawvideo -pix_fmt yuv420p \
-         -vf scale={w}:{h},fps={fps} pipe:1",
-        seek = seek,
-        reconnect = reconnect,
-        path = path,
+        "ffmpeg -v error {seek}{reconnect} -i {path} -an -f rawvideo -pix_fmt yuv420p \
+         -vf scale={w}:{h},fps={fps} pipe:1"
     )
 }
 
@@ -243,12 +348,16 @@ fn seek_flag(offset: Duration) -> String {
 }
 
 fn record_audio_cmd(path: &str) -> String {
-    format!("ffmpeg -v error -f s16le -ar 48000 -ac 2 -i pipe:0 -y {path:?}")
+    format!(
+        "ffmpeg -v error -f s16le -ar 48000 -ac 2 -i pipe:0 -y {}",
+        shell_quote(path)
+    )
 }
 
 fn record_video_cmd(path: &str, w: u32, h: u32, fps: u8) -> String {
     format!(
-        "ffmpeg -v error -f rawvideo -pix_fmt yuv420p -s {w}x{h} -r {fps} -i pipe:0 -y {path:?}"
+        "ffmpeg -v error -f rawvideo -pix_fmt yuv420p -s {w}x{h} -r {fps} -i pipe:0 -y {}",
+        shell_quote(path)
     )
 }
 

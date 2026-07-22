@@ -42,7 +42,9 @@ pub use e2e::{
     ConferenceInvite, ConferenceState, ConferenceTarget,
 };
 pub use error::TgCallsError;
-pub use media::{auto_media, auto_media_at, probe_duration, Media};
+pub use media::{
+    auto_media, auto_media_at, auto_media_at_probed, auto_media_probed, probe_duration, Media,
+};
 pub use p2p::{P2PCall, P2PCallState, P2PEvent};
 pub use signaling::parse_conference_link;
 

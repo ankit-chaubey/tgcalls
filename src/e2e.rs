@@ -884,6 +884,7 @@ pub struct ConferenceCalls {
     client: ferogram::Client,
     active: Arc<tokio::sync::Mutex<HashMap<i64, Arc<ConferenceCall>>>>,
     event_handler: Arc<Mutex<Option<ManagerEventHandler>>>,
+    max_concurrent: Option<usize>,
 }
 
 impl ConferenceCalls {
@@ -892,6 +893,22 @@ impl ConferenceCalls {
             client,
             active: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             event_handler: Arc::new(Mutex::new(None)),
+            max_concurrent: None,
+        }
+    }
+
+    /// Same as [`ConferenceCalls::new`], but caps how many chats can have
+    /// an active conference at once. Each tracked chat gets its own
+    /// dedicated actor thread (see the module docs) - fine at tens or low
+    /// hundreds of concurrent conferences, but unbounded growth isn't free
+    /// at very high counts. `start`/`create`/`join` return
+    /// [`TgCallsError::TooManyConcurrentCalls`] instead of starting a new
+    /// conference once the limit is hit; chats already active are
+    /// unaffected (same rule as `Calls::with_concurrency_limit`).
+    pub fn with_concurrency_limit(client: ferogram::Client, max_concurrent: usize) -> Self {
+        Self {
+            max_concurrent: Some(max_concurrent),
+            ..Self::new(client)
         }
     }
 
@@ -903,11 +920,24 @@ impl ConferenceCalls {
         *self.event_handler.lock().unwrap() = Some(Arc::new(handler));
     }
 
-    async fn get_or_create(&self, chat_id: i64) -> Arc<ConferenceCall> {
-        let mut active = self.active.lock().await;
-        if let Some(conference) = active.get(&chat_id) {
-            return conference.clone();
+    async fn get_or_create(&self, chat_id: i64) -> Result<Arc<ConferenceCall>, TgCallsError> {
+        if let Some(conference) = self.active.lock().await.get(&chat_id) {
+            return Ok(conference.clone());
         }
+
+        if let Some(max) = self.max_concurrent {
+            if self.active.lock().await.len() >= max {
+                return Err(TgCallsError::TooManyConcurrentCalls(max));
+            }
+        }
+
+        // Spawned outside the lock: starting a conference (an OS thread
+        // plus its own Tokio runtime) shouldn't hold up lookups for every
+        // other chat while it happens. If two callers race for the same
+        // chat_id, the loser's conference is simply dropped here - its
+        // thread exits on its own once the sender goes away, since
+        // nothing was ever joined on it yet (same rule as
+        // `Calls::get_or_create`).
         let handler = self.event_handler.lock().unwrap().clone();
         let conference = Arc::new(ConferenceCall::new(
             self.client.clone(),
@@ -918,8 +948,9 @@ impl ConferenceCalls {
                 }
             },
         ));
-        active.insert(chat_id, conference.clone());
-        conference
+
+        let mut active = self.active.lock().await;
+        Ok(active.entry(chat_id).or_insert(conference).clone())
     }
 
     async fn get(&self, chat_id: i64) -> Result<Arc<ConferenceCall>, TgCallsError> {
@@ -943,7 +974,7 @@ impl ConferenceCalls {
         target: ConferenceTarget,
         media: Option<MediaDescription>,
     ) -> Result<(), TgCallsError> {
-        let conference = self.get_or_create(chat_id).await;
+        let conference = self.get_or_create(chat_id).await?;
         conference.start(target, media).await
     }
 
