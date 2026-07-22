@@ -40,12 +40,11 @@ tgcalls = "0.2"
 Before using `tgcalls`, make sure you have:
 
 - **FFmpeg** available on your `PATH` for media decoding.
-- **A C++ toolchain** and development libraries required to build `NTgCalls`.
 
 On Debian/Ubuntu:
 
 ```bash
-sudo apt install build-essential zlib1g-dev ffmpeg
+sudo apt install ffmpeg
 ```
 
 ## Examples
