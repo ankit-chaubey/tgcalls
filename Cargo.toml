@@ -1,12 +1,12 @@
 [package]
 name            = "tgcalls"
-version         = "0.2.0-beta2"
+version         = "0.2.0"
 edition         = "2021"
 authors         = ["Ankit Chaubey <ankitchaubey.dev@gmail.com>"]
 license         = "MIT OR Apache-2.0"
-description     = "An elegant Rust client for Telegram voice and video calls."
-documentation   = "https://docs.rs/tgcalls"
-homepage        = "https://github.com/ankit-chaubey/tgcalls"
+description     = "An elegant Rust framework for building Telegram voice and video calling applications."
+documentation   = "https://tgcalls.ferogram.dev"
+homepage        = "https://ferogram.dev/tgcalls"
 repository      = "https://github.com/ankit-chaubey/tgcalls"
 readme          = "README.md"
 keywords        = ["telegram", "tgcalls", "ntgcalls", "webrtc", "voip"]
@@ -69,7 +69,7 @@ name = "conference_calls_managed"
 path = "examples/conference_calls_managed.rs"
 
 [dependencies]
-ferogram   = "0.6.4"
+ferogram   = "0.6.5"
 ntgcalls   = "=3.0.0-beta14"
 tokio      = { version = "1", features = ["full"] }
 thiserror  = "1"
