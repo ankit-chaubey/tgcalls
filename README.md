@@ -1,7 +1,7 @@
 <img src="https://raw.githubusercontent.com/ankit-chaubey/tgcalls/main/.github/images/tgcalls.png" alt="tgcalls logo" />
 
 <p align="center">
-    <b>An elegant Rust client for Telegram voice and video calls.</b>
+    <b>An elegant Rust library for Telegram voice and video calls.</b>
     <br>
     <sub>Powered by <a href="https://github.com/pytgcalls/ntgcalls">ntgcalls</a> and <a href="https://github.com/ankit-chaubey/ferogram">ferogram</a>.</sub>
     <br><br>
