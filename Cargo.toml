@@ -71,12 +71,11 @@ path = "examples/conference_calls_managed.rs"
 [dependencies]
 ferogram   = "0.6.5"
 ntgcalls   = "=3.0.0-beta14"
-tokio      = { version = "1", features = ["full"] }
-thiserror  = "1"
+tokio      = { version = "1.23.1", features = ["full"] }
+thiserror  = "2"
 tracing    = "0.1"
 serde_json = "1"
-base64     = "0.22"
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 anyhow             = "1"
