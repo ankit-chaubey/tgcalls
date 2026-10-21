@@ -319,7 +319,7 @@ impl ConferenceCall {
                 }
                 {
                     let tx = actor_tx.clone();
-                    ntg.on_request_participants(move |_chat_id| {
+                    ntg.on_request_participants(move |_chat_id, _req| {
                         let _ = tx.send(Command::RequestParticipants);
                     });
                 }

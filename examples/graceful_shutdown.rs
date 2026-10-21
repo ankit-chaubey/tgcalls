@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || args.len() % 2 != 0 {
+    if args.is_empty() || !args.len().is_multiple_of(2) {
         anyhow::bail!("usage: graceful_shutdown <chat_id> <file> [<chat_id> <file> ...]");
     }
 
