@@ -46,7 +46,7 @@ pub use media::{
     auto_media, auto_media_at, auto_media_at_probed, auto_media_probed, probe_duration, Media,
 };
 pub use p2p::{P2PCall, P2PCallState, P2PEvent};
-pub use signaling::parse_conference_link;
+pub use signaling::{parse_conference_link, send_p2p_signaling};
 
 pub use ntgcalls::{
     AudioDescription, AuthParams, CallType, ConnectionMode, DeviceInfo, DhConfig, FrameData,
