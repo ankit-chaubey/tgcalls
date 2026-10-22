@@ -68,6 +68,10 @@ path = "examples/conference_calls.rs"
 name = "conference_calls_managed"
 path = "examples/conference_calls_managed.rs"
 
+[[example]]
+name = "conference_video_calls"
+path = "examples/conference_video_calls.rs"
+
 [dependencies]
 ferogram     = "0.6.5"
 ntgcalls     = "=3.0.5"
