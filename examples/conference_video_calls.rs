@@ -2,19 +2,20 @@
 // *video* call, and streams a video file (audio + video from the same
 // source) once they have actually joined.
 //
-// Same flow as conference_calls.rs, with three video-specific differences:
+// Same flow as conference_calls.rs, with two video-specific differences:
 //
-// 1. We start the conference with `media: None` and ring the invitee with
-//    `invite(user, Some(true))`. Whether video is signaled is normally
-//    derived from the media being played; since we are deliberately not
-//    playing anything yet, we override it so the invitee's phone rings as a
-//    video call anyway.
+// 1. Whether the conference signals "video on" is decided at join time,
+//    from the media passed to `start` - `play` later does not change it.
+//    Starting with `media: None` would join as "video stopped" and the
+//    invitee would never render our camera, even after `play`. So we start
+//    with a placeholder camera source (`Media::external_video`): it counts
+//    as video for the join and the invite ring, but sends nothing until
+//    something feeds it.
 // 2. Once `ConferenceEvent::ParticipantsChanged` says someone joined, we
-//    call `play` with `Media::av(..)` - audio and video from one file, two
-//    ffmpeg processes. `play` also flips the conference's own idea of "we
-//    are streaming video" for any later `invite(user, None)` calls.
-// 3. Width/height is a bounding box; the source is fit into it preserving
-//    its real aspect ratio, never stretched.
+//    swap the placeholder for the real thing with `play(Media::av(..))` -
+//    audio and video from one file, two ffmpeg processes. Width/height is
+//    a bounding box; the source is fit into it preserving its aspect
+//    ratio, never stretched.
 //
 // We still relay `UpdateGroupCallChainBlocks` from the raw update stream
 // into the conference by hand (`ConferenceCall` isn't wrapped by `Calls`),
@@ -25,7 +26,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tgcalls::{ConferenceCall, ConferenceEvent, ConferenceTarget, Media};
+use tgcalls::{ConferenceCall, ConferenceEvent, ConferenceTarget, Media, MediaDescription};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,18 +96,28 @@ async fn main() -> anyhow::Result<()> {
         }
     }));
 
-    // Create the conference with nobody invited and nothing playing yet.
-    println!("creating conference...");
+    // Placeholder camera: makes the join and the invite signal video, but
+    // streams nothing until `play` replaces it below.
+    let placeholder = MediaDescription {
+        microphone: None,
+        speaker: None,
+        camera: Some(Media::external_video(width, height, fps)),
+        screen: None,
+    };
+
+    println!("starting conference and ringing {invitee} as a video call...");
     conference
-        .start(ConferenceTarget::Create { invite: vec![] }, None)
+        .start(
+            ConferenceTarget::Create {
+                invite: vec![invitee],
+            },
+            Some(placeholder),
+        )
         .await?;
+    println!("conference created, ringing {invitee} - not streaming yet");
     if let Some(link) = conference.invite_link().await {
         println!("share this to let anyone join: {link}");
     }
-
-    // Ring the invitee as a video call, even though we are not streaming yet.
-    println!("ringing {invitee} as a video call...");
-    conference.invite(invitee, Some(true)).await?;
 
     let relay = tokio::spawn({
         let conference = conference.clone();
