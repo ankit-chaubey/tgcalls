@@ -1,6 +1,6 @@
 [package]
 name            = "tgcalls"
-version         = "0.3.0-rc"
+version         = "0.3.0"
 edition         = "2021"
 authors         = ["Ankit Chaubey <ankitchaubey.dev@gmail.com>"]
 license         = "MIT OR Apache-2.0"
@@ -73,7 +73,7 @@ name = "conference_video_calls"
 path = "examples/conference_video_calls.rs"
 
 [dependencies]
-ferogram     = "0.6.5"
+ferogram     = "0.6.6"
 ntgcalls     = "=3.0.5"
 ntgcalls-sys = "=3.0.5"
 tokio        = { version = "1.23.1", features = ["full"] }
