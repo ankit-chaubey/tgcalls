@@ -19,7 +19,10 @@ use std::time::Duration;
 use ferogram::middleware::{BoxFuture, Middleware, Next};
 use ferogram::tl;
 use ferogram::Update;
-use ntgcalls::{CallType, ConnectionMode, MediaDescription, StreamMode};
+use ntgcalls::{
+    AudioDescription, CallType, ConnectionMode, FrameData, MediaDescription, MediaState,
+    StreamDevice, StreamMode, VideoDescription,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::media::{auto_media_at_probed, auto_media_probed};
@@ -58,6 +61,10 @@ pub struct CallStatus {
     pub connection_mode: Option<ConnectionMode>,
     pub muted: bool,
     pub video_paused: bool,
+    /// No camera source is being sent.
+    pub video_stopped: bool,
+    /// A screen share is running.
+    pub presentation_active: bool,
     pub progress: Progress,
 }
 
@@ -71,6 +78,12 @@ enum Command {
     Mute(Reply<()>),
     Unmute(Reply<()>),
     SetVolume(i64, i32, Reply<()>),
+    SetCamera(Option<VideoDescription>, Reply<()>),
+    SetMicrophone(Option<AudioDescription>, Reply<()>),
+    SetScreen(Option<VideoDescription>, Reply<()>),
+    MediaState(Reply<MediaState>),
+    CurrentMedia(Reply<MediaDescription>),
+    ExternalFrame(StreamDevice, Vec<u8>, FrameData, Reply<()>),
     GetParticipants(Reply<Vec<tl::types::GroupCallParticipant>>),
     CallType(Reply<CallType>),
     ConnectionMode(Reply<ConnectionMode>),
@@ -176,6 +189,25 @@ impl Worker {
                         Command::SetVolume(user_id, volume, reply) => {
                             let _ = reply.send(call.set_volume(user_id, volume).await);
                         }
+                        Command::SetCamera(camera, reply) => {
+                            let _ = reply.send(call.set_camera(camera).await);
+                        }
+                        Command::SetMicrophone(microphone, reply) => {
+                            let _ = reply.send(call.set_microphone(microphone).await);
+                        }
+                        Command::SetScreen(screen, reply) => {
+                            let _ = reply.send(call.set_screen(screen).await);
+                        }
+                        Command::MediaState(reply) => {
+                            let _ = reply.send(call.media_state().await);
+                        }
+                        Command::CurrentMedia(reply) => {
+                            let _ = reply.send(Ok(call.current_media().clone()));
+                        }
+                        Command::ExternalFrame(device, data, frame_data, reply) => {
+                            let _ = reply
+                                .send(call.send_external_frame(device, &data, &frame_data).await);
+                        }
                         Command::GetParticipants(reply) => {
                             let _ = reply.send(call.get_participants().await);
                         }
@@ -213,8 +245,13 @@ impl Worker {
                                     connection_mode: call.connection_mode().await.ok(),
                                     muted: media_state.as_ref().map(|s| s.muted).unwrap_or(false),
                                     video_paused: media_state
+                                        .as_ref()
                                         .map(|s| s.video_paused)
                                         .unwrap_or(false),
+                                    video_stopped: media_state
+                                        .map(|s| s.video_stopped)
+                                        .unwrap_or(true),
+                                    presentation_active: call.is_presentation_active(),
                                     progress,
                                 })
                             }
@@ -353,15 +390,31 @@ impl Calls {
 
     /// Joins and streams `source`, or switches the stream if already joined.
     /// Starts a new voice chat first if none is active yet. Picks audio-only
-    /// vs audio+video by probing the source. For anything else (custom
-    /// resolution, screen share, external frames, or joining without
-    /// auto-starting) use [`Call`] directly.
+    /// vs audio+video by probing the source. For a custom mix of sources
+    /// (resolution, camera, devices, external frames) use
+    /// [`Calls::play_media`]; for screen share, camera and mic changes
+    /// mid-call use [`Calls::set_screen`], [`Calls::set_camera`] and
+    /// [`Calls::set_microphone`]. Joining without auto-starting a voice
+    /// chat still needs [`Call`] directly.
     pub async fn play(&self, chat_id: i64, source: impl Into<String>) -> Result<(), TgCallsError> {
         let source = source.into();
         let (media, duration) = auto_media_probed(&source, 1280, 720, 30).await;
 
         let worker = self.get_or_create(chat_id).await?;
         worker.send(|r| Command::Play(media, duration, r)).await
+    }
+
+    /// Joins and streams exactly `media`, or switches to it if already
+    /// joined: any mix of mic, camera and screen, custom resolution,
+    /// devices or external frames. Starts a new voice chat first if none is
+    /// active yet. Sources left as `None` are removed.
+    pub async fn play_media(
+        &self,
+        chat_id: i64,
+        media: MediaDescription,
+    ) -> Result<(), TgCallsError> {
+        let worker = self.get_or_create(chat_id).await?;
+        worker.send(|r| Command::Play(media, None, r)).await
     }
 
     /// Restarts the stream at `offset` into `source` (fast, keyframe-based
@@ -441,6 +494,78 @@ impl Calls {
             .await?
             .send(|r| Command::SetVolume(user_id, volume, r))
             .await
+    }
+
+    /// Camera on (`Some`), swapped, or off (`None`), without touching the
+    /// mic or screen. Works at any time while joined.
+    pub async fn set_camera(
+        &self,
+        chat_id: i64,
+        camera: Option<VideoDescription>,
+    ) -> Result<(), TgCallsError> {
+        self.get(chat_id)
+            .await?
+            .send(|r| Command::SetCamera(camera, r))
+            .await
+    }
+
+    /// Sets, swaps or removes the outgoing audio source. To silence the mic
+    /// while keeping the source, use [`Calls::mute`].
+    pub async fn set_microphone(
+        &self,
+        chat_id: i64,
+        microphone: Option<AudioDescription>,
+    ) -> Result<(), TgCallsError> {
+        self.get(chat_id)
+            .await?
+            .send(|r| Command::SetMicrophone(microphone, r))
+            .await
+    }
+
+    /// Starts screen sharing (`Some`), swaps the shared source, or stops
+    /// sharing (`None`).
+    pub async fn set_screen(
+        &self,
+        chat_id: i64,
+        screen: Option<VideoDescription>,
+    ) -> Result<(), TgCallsError> {
+        self.get(chat_id)
+            .await?
+            .send(|r| Command::SetScreen(screen, r))
+            .await
+    }
+
+    /// Current mute / pause / camera / screen flags for `chat_id`.
+    pub async fn media_state(&self, chat_id: i64) -> Result<MediaState, TgCallsError> {
+        self.get(chat_id).await?.send(Command::MediaState).await
+    }
+
+    /// What `chat_id` is currently capturing (mic, camera, screen).
+    pub async fn current_media(&self, chat_id: i64) -> Result<MediaDescription, TgCallsError> {
+        self.get(chat_id).await?.send(Command::CurrentMedia).await
+    }
+
+    /// Pushes one raw frame into a source configured with
+    /// `MediaSource::External` (see `Media::external_video` and
+    /// `Media::external_audio`).
+    pub async fn send_external_frame(
+        &self,
+        chat_id: i64,
+        device: StreamDevice,
+        frame: &[u8],
+        frame_data: &FrameData,
+    ) -> Result<(), TgCallsError> {
+        let data = frame.to_vec();
+        let frame_data = frame_data.clone();
+        self.get(chat_id)
+            .await?
+            .send(|r| Command::ExternalFrame(device, data, frame_data, r))
+            .await
+    }
+
+    /// Chats that currently have a tracked call.
+    pub async fn chats(&self) -> Vec<i64> {
+        self.active.lock().await.keys().copied().collect()
     }
 
     pub async fn get_participants(

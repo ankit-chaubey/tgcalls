@@ -49,6 +49,10 @@ name = "mute_resume_calls"
 path = "examples/mute_resume_calls.rs"
 
 [[example]]
+name = "call_controls"
+path = "examples/call_controls.rs"
+
+[[example]]
 name = "recording_calls"
 path = "examples/recording_calls.rs"
 
@@ -73,7 +77,7 @@ name = "conference_video_calls"
 path = "examples/conference_video_calls.rs"
 
 [dependencies]
-ferogram     = "0.6.5"
+ferogram     = "0.6.6"
 ntgcalls     = "=3.0.5"
 ntgcalls-sys = "=3.0.5"
 tokio        = { version = "1.23.1", features = ["full"] }

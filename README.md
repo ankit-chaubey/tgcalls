@@ -94,6 +94,24 @@ Direct, one-on-one calls work the same way in spirit, ring someone, exchange key
 
 Video and screen share follow the same pattern, `Media::video`, `Media::av`, and `Media::screen` build the right ffmpeg pipeline for you. The `examples/` folder has a short, working file for each of these, that's genuinely the fastest way to see how it all fits together.
 
+## Controls
+
+Every call type (group, private, conference) has the same controls, and you can use them at any time while the call is up:
+
+```rust
+calls.mute(chat_id).await?;                              // mic off
+calls.unmute(chat_id).await?;                            // mic on
+calls.pause(chat_id).await?;                             // pause the stream
+calls.resume(chat_id).await?;
+calls.set_camera(chat_id, Some(camera)).await?;          // camera on, or swap it
+calls.set_camera(chat_id, None).await?;                  // camera off
+calls.set_screen(chat_id, Some(Media::screen(1280, 720, 30))).await?;  // share screen
+calls.set_screen(chat_id, None).await?;                  // stop sharing
+let state = calls.media_state(chat_id).await?;           // muted, video paused, ...
+```
+
+Changing one source keeps the others, and your state is pushed to Telegram automatically, so other participants see it. `Call`, `P2PCall` and `ConferenceCall` use the same method names without the `chat_id`, and all three implement the `CallControls` trait, so a function written against `impl CallControls` works with any of them. `send_external_frame` (feed your own raw frames) is available on every call type too. `Calls::play_media` switches to any mix of sources in one call, and `examples/call_controls.rs` drives all of this from the terminal.
+
 ## Credits
 
 TgCalls wouldn't exist without these projects and the people behind them.
