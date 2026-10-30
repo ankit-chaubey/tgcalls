@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use ferogram::tl;
 use ntgcalls::{
-    CallType, ConnectionInfo, ConnectionMode, ConnectionState, FrameData, MediaDescription,
-    MediaSegmentPartStatus, NTgCalls, SsrcGroup, StreamDevice, StreamMode, StreamType,
-    VideoDescription,
+    AudioDescription, CallType, ConnectionInfo, ConnectionMode, ConnectionState, FrameData,
+    MediaDescription, MediaSegmentPartStatus, MediaState, NTgCalls, SsrcGroup, StreamDevice,
+    StreamMode, StreamType, VideoDescription,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::{error::TgCallsError, signaling};
+use crate::{error::TgCallsError, signaling, signaling::MediaStateSync};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallState {
@@ -53,6 +53,10 @@ pub enum CallEvent {
     Left,
     /// The voice chat was ended for everyone.
     Ended,
+    /// Your own mute / pause / camera / screen state changed, whether from
+    /// a method on this `Call` or from the stream itself. Already pushed to
+    /// Telegram by the time this fires.
+    MediaStateChanged(MediaState),
 }
 
 type EventHandler = Arc<dyn Fn(CallEvent) + Send + Sync>;
@@ -87,8 +91,24 @@ pub struct Call {
     state: CallState,
     active_call: Option<ferogram::tl::enums::InputGroupCall>,
     presentation_active: bool,
+    /// What is currently being captured. ntgcalls replaces the whole
+    /// capture set on every `set_stream_sources`, so single-source changes
+    /// (`set_camera`, `set_microphone`, `set_screen`) start from this.
+    media: MediaDescription,
+    /// Sends our mute / camera / screen state to Telegram. Fresh on every
+    /// join, so a rejoin always announces its real state.
+    sync: MediaStateSync,
     video_subs: Arc<Mutex<HashMap<i64, VideoSubs>>>,
     event_handler: Option<EventHandler>,
+}
+
+pub(crate) fn no_media() -> MediaDescription {
+    MediaDescription {
+        microphone: None,
+        speaker: None,
+        camera: None,
+        screen: None,
+    }
 }
 
 /// Whether a join() failure looks transient and worth retrying: flood
@@ -195,6 +215,8 @@ impl Call {
             state: CallState::Idle,
             active_call: None,
             presentation_active: false,
+            media: no_media(),
+            sync: MediaStateSync::default(),
             video_subs: Arc::new(Mutex::new(HashMap::new())),
             event_handler: None,
         }
@@ -313,9 +335,22 @@ impl Call {
         // connect() only dispatches the SDP; Connected arrives via the callback.
         rx.await.expect("connection callback never fired")?;
 
+        self.sync = MediaStateSync::default();
+        self.start_state_sync(call.clone());
         self.ntg
             .set_stream_sources(ntg_id, StreamMode::Capture, &media)
             .await?;
+        self.media = media;
+
+        // join_call() announces "unmuted, video on". Send the real state
+        // once so an audio-only join doesn't show up as a video participant.
+        if let Err(e) = self
+            .sync
+            .refresh(&self.client, call.clone(), &self.ntg, ntg_id)
+            .await
+        {
+            warn!("tgcalls: initial media state sync failed: {}", e);
+        }
 
         self.active_call = Some(call);
         self.state = CallState::Joined;
@@ -350,6 +385,7 @@ impl Call {
         // `Leaving` forever - unable to join() or leave() again - would be
         // strictly worse than surfacing this error while still recovering.
         self.video_subs.lock().unwrap().clear();
+        self.media = no_media();
         self.state = CallState::Idle;
 
         if let Err(e) = leave_result {
@@ -389,17 +425,30 @@ impl Call {
 
         self.ntg.connect(ntg_id, &transport_json, true).await?;
 
-        let desc = MediaDescription {
-            microphone: None,
-            speaker: None,
-            camera: None,
-            screen: Some(screen),
-        };
-        self.ntg
+        // Keep whatever is already streaming (mic, camera): ntgcalls drops
+        // every device missing from the description.
+        let mut desc = self.media.clone();
+        desc.screen = Some(screen);
+        if let Err(e) = self
+            .ntg
             .set_stream_sources(ntg_id, StreamMode::Capture, &desc)
-            .await?;
+            .await
+        {
+            let _ = self.ntg.stop_presentation(ntg_id).await;
+            if let Some(call) = self.active_call.clone() {
+                let _ = signaling::leave_presentation(&self.client, call).await;
+            }
+            return Err(e.into());
+        }
+        self.media = desc;
 
         self.presentation_active = true;
+        if let Err(e) = self.push_media_state().await {
+            warn!(
+                "tgcalls: media state sync after presentation start failed: {}",
+                e
+            );
+        }
         info!("tgcalls: presentation started in chat {}", self.chat_id);
         Ok(())
     }
@@ -425,6 +474,13 @@ impl Call {
         // signaling failure - that would incorrectly block a future
         // join_presentation() until this is retried.
         self.presentation_active = false;
+        self.media.screen = None;
+        if let Err(e) = self.push_media_state().await {
+            warn!(
+                "tgcalls: media state sync after presentation stop failed: {}",
+                e
+            );
+        }
 
         leave_result?;
         info!("tgcalls: presentation stopped in chat {}", self.chat_id);
@@ -509,11 +565,105 @@ impl Call {
         self.ntg
             .set_stream_sources(ntg_chat_id(self.chat_id), stream_mode, media)
             .await?;
+        if stream_mode == StreamMode::Capture {
+            self.media = media.clone();
+            // Dropping the screen source ends the share, so close the
+            // presentation connection too instead of leaving it dangling.
+            if self.presentation_active && media.screen.is_none() {
+                self.stop_presentation().await?;
+            }
+            self.push_media_state().await?;
+        }
         Ok(())
     }
 
-    /// Starts recording using a [`Media::record_audio`]/[`Media::record_video`]/
-    /// [`Media::record_screen`] description. Shorthand for
+    /// Turns the camera on (`Some`), swaps it, or turns it off (`None`)
+    /// without touching the mic or screen. Works at any time while joined.
+    pub async fn set_camera(
+        &mut self,
+        camera: Option<VideoDescription>,
+    ) -> Result<(), TgCallsError> {
+        let mut media = self.media.clone();
+        media.camera = camera;
+        self.set_stream_sources(StreamMode::Capture, &media).await
+    }
+
+    /// Sets, swaps or removes the outgoing audio source. To silence the
+    /// mic while keeping the source, use [`Call::mute`] instead.
+    pub async fn set_microphone(
+        &mut self,
+        microphone: Option<AudioDescription>,
+    ) -> Result<(), TgCallsError> {
+        let mut media = self.media.clone();
+        media.microphone = microphone;
+        self.set_stream_sources(StreamMode::Capture, &media).await
+    }
+
+    /// Starts screen sharing (`Some`), swaps the shared source, or stops
+    /// sharing (`None`). Handles the separate presentation connection.
+    pub async fn set_screen(
+        &mut self,
+        screen: Option<VideoDescription>,
+    ) -> Result<(), TgCallsError> {
+        match screen {
+            Some(s) if self.presentation_active => {
+                let mut media = self.media.clone();
+                media.screen = Some(s);
+                self.set_stream_sources(StreamMode::Capture, &media).await
+            }
+            Some(s) => self.join_presentation(s).await,
+            None => {
+                self.stop_presentation().await?;
+                if self.media.screen.is_some() {
+                    let mut media = self.media.clone();
+                    media.screen = None;
+                    self.set_stream_sources(StreamMode::Capture, &media).await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// What is currently being captured (mic, camera, screen).
+    pub fn current_media(&self) -> &MediaDescription {
+        &self.media
+    }
+
+    /// Forwards ntgcalls' state changes to Telegram, in order, and to the
+    /// event handler. ntgcalls calls back on its native thread, so the
+    /// callback only queues; a task on this runtime does the RPC.
+    fn start_state_sync(&mut self, call: tl::enums::InputGroupCall) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<MediaState>();
+        self.ntg.on_upgrade(move |_chat_id, state| {
+            let _ = tx.send(state);
+        });
+        let client = self.client.clone();
+        let handler = self.event_handler.clone();
+        let sync = self.sync.clone();
+        tokio::spawn(async move {
+            while let Some(state) = rx.recv().await {
+                if let Some(h) = &handler {
+                    h(CallEvent::MediaStateChanged(state.clone()));
+                }
+                if let Err(e) = sync.push(&client, call.clone(), &state).await {
+                    warn!("tgcalls: media state sync failed: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Tells Telegram the state ntgcalls has right now. Every control calls
+    /// this directly, because ntgcalls' own state callback does not fire
+    /// for every change. A push that changes nothing is skipped.
+    async fn push_media_state(&self) -> Result<(), TgCallsError> {
+        let call = self.active_call.clone().ok_or(TgCallsError::NotJoined)?;
+        self.sync
+            .refresh(&self.client, call, &self.ntg, ntg_chat_id(self.chat_id))
+            .await
+    }
+
+    /// Starts recording using a [`crate::Media::record_audio`]/[`crate::Media::record_video`]/
+    /// [`crate::Media::record_screen`] description. Shorthand for
     /// `set_stream_sources(StreamMode::Playback, media)`.
     pub async fn record(&mut self, media: &MediaDescription) -> Result<(), TgCallsError> {
         self.set_stream_sources(StreamMode::Playback, media).await
@@ -536,16 +686,18 @@ impl Call {
             .await?)
     }
 
+    /// Pauses the outgoing stream (audio and video). Other participants
+    /// see your video as paused.
     pub async fn pause(&mut self) -> Result<(), TgCallsError> {
         self.require_joined()?;
         self.ntg.pause(ntg_chat_id(self.chat_id)).await?;
-        Ok(())
+        self.push_media_state().await
     }
 
     pub async fn resume(&mut self) -> Result<(), TgCallsError> {
         self.require_joined()?;
         self.ntg.resume(ntg_chat_id(self.chat_id)).await?;
-        Ok(())
+        self.push_media_state().await
     }
 
     /// Seconds of the given stream played so far.
@@ -557,26 +709,17 @@ impl Call {
             .await?)
     }
 
+    /// Silences your mic without leaving or changing the source.
     pub async fn mute(&mut self) -> Result<(), TgCallsError> {
         self.require_joined()?;
-        let call = self
-            .active_call
-            .as_ref()
-            .ok_or(TgCallsError::NotJoined)?
-            .clone();
-        let _ = self.ntg.mute(ntg_chat_id(self.chat_id)).await;
-        signaling::set_muted(&self.client, call, true).await
+        self.ntg.mute(ntg_chat_id(self.chat_id)).await?;
+        self.push_media_state().await
     }
 
     pub async fn unmute(&mut self) -> Result<(), TgCallsError> {
         self.require_joined()?;
-        let call = self
-            .active_call
-            .as_ref()
-            .ok_or(TgCallsError::NotJoined)?
-            .clone();
-        let _ = self.ntg.unmute(ntg_chat_id(self.chat_id)).await;
-        signaling::set_muted(&self.client, call, false).await
+        self.ntg.unmute(ntg_chat_id(self.chat_id)).await?;
+        self.push_media_state().await
     }
 
     /// Sets how loud `user_id` sounds to *you* in this call. 0 = muted for

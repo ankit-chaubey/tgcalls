@@ -4,13 +4,11 @@
 //
 // Same flow as conference_calls.rs, with two video-specific differences:
 //
-// 1. Whether the conference signals "video on" is decided at join time,
-//    from the media passed to `start` - `play` later does not change it.
-//    Starting with `media: None` would join as "video stopped" and the
-//    invitee would never render our camera, even after `play`. So we start
-//    with a placeholder camera source (`Media::external_video`): it counts
-//    as video for the join and the invite ring, but sends nothing until
-//    something feeds it.
+// 1. The join itself announces whether you have video, from the media
+//    passed to `start`. Starting with `media: None` would announce "no
+//    video" until `play` corrects it. So we start with a placeholder camera
+//    (`Media::external_video`): it counts as video for the join and the
+//    invite ring, but sends nothing until something feeds it.
 // 2. Once `ConferenceEvent::ParticipantsChanged` says someone joined, we
 //    swap the placeholder for the real thing with `play(Media::av(..))` -
 //    audio and video from one file, two ffmpeg processes. Width/height is

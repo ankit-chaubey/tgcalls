@@ -49,6 +49,10 @@ name = "mute_resume_calls"
 path = "examples/mute_resume_calls.rs"
 
 [[example]]
+name = "call_controls"
+path = "examples/call_controls.rs"
+
+[[example]]
 name = "recording_calls"
 path = "examples/recording_calls.rs"
 

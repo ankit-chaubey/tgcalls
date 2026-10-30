@@ -18,6 +18,38 @@
 //! genuinely different join/signaling flow (block chains, not participant
 //! updates), documented in the `e2e` module.
 //!
+//! # Controls
+//!
+//! Every call type has the same controls, usable at any time while the
+//! call is up and in any order. Your state is pushed to Telegram for you,
+//! so other participants see mute, paused video, camera and screen share
+//! as they change. [`CallControls`] puts them behind one trait, so code
+//! that only needs the controls works with a [`Call`], a [`P2PCall`] or a
+//! [`ConferenceCall`].
+//!
+//! | Control | Method |
+//! |---|---|
+//! | Mic off / on | `mute()` / `unmute()` |
+//! | Pause / resume the stream | `pause()` / `resume()` |
+//! | Camera on, swap, off | `set_camera(Some(..))` / `set_camera(None)` |
+//! | Mic source set, swap, removed | `set_microphone(Some(..))` / `set_microphone(None)` |
+//! | Screen share on, swap, off | `set_screen(Some(..))` / `set_screen(None)` |
+//! | Current state | `media_state()` |
+//!
+//! [`Calls`] and [`ConferenceCalls`] take a `chat_id` first. [`Calls`] also
+//! has `play_media(chat_id, MediaDescription)` to switch to any mix of
+//! sources in one call, `status()` for a one-call snapshot and `chats()`
+//! for the tracked chats. Changes to a single source keep the others, so
+//! turning the camera on never drops the mic.
+//!
+//! Use `mute()` to silence the mic and keep the source. `set_microphone(None)`
+//! removes the source entirely.
+//!
+//! For group calls, [`CallEvent::MediaStateChanged`] fires on every change,
+//! including ones caused by the stream itself. Conferences have the
+//! matching [`ConferenceEvent::MediaStateChanged`]. P2P state is sent to the
+//! other side by ntgcalls directly.
+//!
 //! # What's not here
 //!
 //! - **Automatic reconnection** - if the network degrades, [`Call`] doesn't
@@ -27,6 +59,7 @@
 
 mod call;
 mod calls;
+mod controls;
 mod e2e;
 mod error;
 mod media;
@@ -37,6 +70,7 @@ use std::time::Instant;
 
 pub use call::{Call, CallEvent, CallState, ParticipantAction};
 pub use calls::{CallStatus, Calls, Progress};
+pub use controls::CallControls;
 pub use e2e::{
     incoming_conference_call, migrate_from_p2p, ConferenceCall, ConferenceCalls, ConferenceEvent,
     ConferenceInvite, ConferenceState, ConferenceTarget,

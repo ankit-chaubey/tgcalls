@@ -1,6 +1,8 @@
 use crate::error::TgCallsError;
 use ferogram::{tl, Client};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 async fn resolve_channel(client: &Client, chat_id: i64) -> Result<(i64, i64), TgCallsError> {
     let channel_id = if chat_id < -1_000_000_000_000 {
@@ -161,24 +163,81 @@ pub async fn leave_call(
     Ok(())
 }
 
-pub async fn set_muted(
-    client: &Client,
-    call: tl::enums::InputGroupCall,
+/// Pushes this side's media state (mute, camera, screen share, pauses) to
+/// Telegram so other participants see what is really being sent.
+///
+/// Two things feed it: ntgcalls' state-change callback and every control
+/// call (`mute`, `set_camera`, `play`, ...) directly. The callback does not
+/// reliably fire for every change on every connection, so the direct push
+/// is what guarantees Telegram hears about it. Both paths go through here,
+/// which serializes the requests so they reach Telegram in order, and
+/// skips a push when the flags are the same as the last successful one.
+///
+/// Video and presentation pause flags are only sent while that source
+/// exists, since Telegram rejects pausing something that isn't being sent.
+#[derive(Clone, Default)]
+pub struct MediaStateSync {
+    last: Arc<Mutex<Option<ParticipantFlags>>>,
+}
+
+impl MediaStateSync {
+    pub async fn push(
+        &self,
+        client: &Client,
+        call: tl::enums::InputGroupCall,
+        state: &ntgcalls::MediaState,
+    ) -> Result<(), TgCallsError> {
+        let flags = participant_flags(state);
+        // Held across the request on purpose: a second push waits for the
+        // first, then sees its flags and skips if nothing changed.
+        let mut last = self.last.lock().await;
+        if last.as_ref() == Some(&flags) {
+            return Ok(());
+        }
+        client
+            .invoke(&tl::functions::phone::EditGroupCallParticipant {
+                call,
+                participant: tl::enums::InputPeer::PeerSelf,
+                muted: Some(flags.muted),
+                volume: None,
+                raise_hand: None,
+                video_stopped: Some(flags.video_stopped),
+                video_paused: flags.video_paused,
+                presentation_paused: flags.presentation_paused,
+            })
+            .await?;
+        *last = Some(flags);
+        Ok(())
+    }
+
+    /// Reads ntgcalls' current state for `chat_id` and pushes it.
+    pub async fn refresh(
+        &self,
+        client: &Client,
+        call: tl::enums::InputGroupCall,
+        ntg: &ntgcalls::NTgCalls,
+        chat_id: i64,
+    ) -> Result<(), TgCallsError> {
+        let state = ntg.get_state(chat_id).await?;
+        self.push(client, call, &state).await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParticipantFlags {
     muted: bool,
-) -> Result<(), TgCallsError> {
-    client
-        .invoke(&tl::functions::phone::EditGroupCallParticipant {
-            call,
-            participant: tl::enums::InputPeer::PeerSelf,
-            muted: Some(muted),
-            volume: None,
-            raise_hand: None,
-            video_stopped: None,
-            video_paused: None,
-            presentation_paused: None,
-        })
-        .await?;
-    Ok(())
+    video_stopped: bool,
+    video_paused: Option<bool>,
+    presentation_paused: Option<bool>,
+}
+
+fn participant_flags(state: &ntgcalls::MediaState) -> ParticipantFlags {
+    ParticipantFlags {
+        muted: state.muted,
+        video_stopped: state.video_stopped,
+        video_paused: (!state.video_stopped).then_some(state.video_paused),
+        presentation_paused: (!state.presentation_stopped).then_some(state.presentation_paused),
+    }
 }
 
 /// Sets how loud `user_id` sounds to *you* in this call (0 = muted for you,
@@ -578,4 +637,74 @@ fn extract_created_call(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(
+        muted: bool,
+        video_paused: bool,
+        video_stopped: bool,
+        presentation_paused: bool,
+        presentation_stopped: bool,
+    ) -> ntgcalls::MediaState {
+        ntgcalls::MediaState {
+            muted,
+            video_paused,
+            video_stopped,
+            presentation_paused,
+            presentation_stopped,
+        }
+    }
+
+    #[test]
+    fn audio_only_reports_video_stopped_and_no_pause_flags() {
+        let f = participant_flags(&state(false, false, true, false, true));
+        assert_eq!(
+            f,
+            ParticipantFlags {
+                muted: false,
+                video_stopped: true,
+                video_paused: None,
+                presentation_paused: None,
+            }
+        );
+    }
+
+    #[test]
+    fn same_state_gives_equal_flags_so_the_push_is_skipped() {
+        let a = participant_flags(&state(false, false, false, false, true));
+        let b = participant_flags(&state(false, false, false, false, true));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn every_control_changes_the_flags_so_it_is_pushed() {
+        let base = participant_flags(&state(false, false, false, false, true));
+        let muted = participant_flags(&state(true, false, false, false, true));
+        let paused = participant_flags(&state(false, true, false, false, true));
+        let no_camera = participant_flags(&state(false, false, true, false, true));
+        let sharing = participant_flags(&state(false, false, false, false, false));
+        for changed in [muted, paused, no_camera, sharing] {
+            assert_ne!(base, changed);
+        }
+    }
+
+    #[test]
+    fn camera_on_reports_pause_state() {
+        let f = participant_flags(&state(false, true, false, false, true));
+        assert!(!f.video_stopped);
+        assert_eq!(f.video_paused, Some(true));
+        assert_eq!(f.presentation_paused, None);
+    }
+
+    #[test]
+    fn screen_share_reports_presentation_pause_state() {
+        let f = participant_flags(&state(true, false, true, true, false));
+        assert!(f.muted);
+        assert_eq!(f.video_paused, None);
+        assert_eq!(f.presentation_paused, Some(true));
+    }
 }
