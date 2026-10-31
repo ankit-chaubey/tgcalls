@@ -52,16 +52,16 @@ async fn main() -> anyhow::Result<()> {
             "resume" => calls.resume(chat_id).await,
             "cam on" => {
                 calls
-                    .set_camera(chat_id, Media::video(&path, 1280, 720, 30).camera)
+                    .set_video(chat_id, Media::video(&path, 1280, 720, 30).camera)
                     .await
             }
-            "cam off" => calls.set_camera(chat_id, None).await,
+            "cam off" => calls.set_video(chat_id, None).await,
             "mic on" => {
                 calls
-                    .set_microphone(chat_id, Media::audio(&path).microphone)
+                    .set_audio(chat_id, Media::audio(&path).microphone)
                     .await
             }
-            "mic off" => calls.set_microphone(chat_id, None).await,
+            "mic off" => calls.set_audio(chat_id, None).await,
             "screen on" => {
                 calls
                     .set_screen(chat_id, Some(Media::screen(1280, 720, 30)))

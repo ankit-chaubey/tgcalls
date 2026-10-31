@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
     // Set media immediately after connect() so it's configured before
     // the WebRTC negotiation completes. ntgcalls will send videoState:"active"
     // in the first MediaState once the encoder starts.
-    call.set_media(StreamMode::Capture, &media).await?;
+    call.set_sources(StreamMode::Capture, &media).await?;
     println!(
         "media sources configured ({}x{} @ {}fps)",
         width, height, fps

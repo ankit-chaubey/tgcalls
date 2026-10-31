@@ -34,9 +34,9 @@ use ferogram::middleware::{BoxFuture, Middleware, Next};
 use ferogram::tl;
 use ferogram::Update;
 use ntgcalls::{
-    AudioDescription, ConnectionInfo, ConnectionState, Frame, FrameData, MediaDescription,
-    MediaState, NTgCalls, RemoteSource, SsrcMapping, StreamDevice, StreamMode, StreamType,
-    SubchainRequest, VideoDescription,
+    AudioDescription, CallType, ConnectionInfo, ConnectionMode, ConnectionState, Frame, FrameData,
+    MediaDescription, MediaState, NTgCalls, RemoteSource, SsrcGroup, SsrcMapping, StreamDevice,
+    StreamMode, StreamType, SubchainRequest, VideoDescription,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -76,12 +76,12 @@ pub enum ConferenceEvent {
     /// which ntgcalls calls whenever it needs a fresh SSRC mapping, which
     /// in practice means the participant set just changed. If you want to
     /// hold off streaming media until someone else has actually joined,
-    /// start with `media: None` and call [`ConferenceCall::play`] the
-    /// first time this fires. `play` also updates the camera / mute state
+    /// start with `media: None` and call [`ConferenceCall::set_sources`] the
+    /// first time this fires. It also updates the camera / mute state
     /// Telegram shows for you, so this works for video too. If the other
     /// side still shows no video, start with a placeholder camera
     /// (`MediaDescription { camera: Some(Media::external_video(..)), .. }`)
-    /// instead: that makes the join itself announce video, and `play` then
+    /// instead: that makes the join itself announce video, and `set_sources` then
     /// swaps in the real source.
     ParticipantsChanged,
     /// Raw decoded media frames. `mode` is `Capture` (your own outgoing
@@ -194,8 +194,8 @@ enum Control {
     Unmute,
     Pause,
     Resume,
-    Camera(Option<VideoDescription>),
-    Microphone(Option<AudioDescription>),
+    Video(Option<VideoDescription>),
+    Audio(Option<AudioDescription>),
     Screen(Option<VideoDescription>),
 }
 
@@ -239,14 +239,32 @@ enum Command {
         video: Option<bool>,
         reply: Reply<()>,
     },
-    /// Start (or change) what you're streaming into an already-running
-    /// conference. Lets you join with `media: None` and start playback
+    /// Replace what you're capturing or playing back in an already-running
+    /// conference. Lets you join with `media: None` and start sending
     /// later - e.g. once [`ConferenceEvent::ParticipantsChanged`] fires,
-    /// so you're not playing to an empty room.
-    Play {
+    /// so you're not sending to an empty room.
+    SetSources {
+        mode: StreamMode,
         media: MediaDescription,
         reply: Reply<()>,
     },
+    IncomingVideo {
+        user_id: i64,
+        endpoint: String,
+        ssrc_groups: Vec<SsrcGroup>,
+        reply: Reply<u32>,
+    },
+    RemoveIncomingVideo {
+        endpoint: String,
+        reply: Reply<bool>,
+    },
+    PlayedSeconds {
+        mode: StreamMode,
+        reply: Reply<u64>,
+    },
+    CallType(Reply<CallType>),
+    ConnectionMode(Reply<ConnectionMode>),
+    CpuUsage(Reply<f64>),
     /// Feed in an `UpdateGroupCallChainBlocks` you received on the normal
     /// update stream (someone else's new block) - wire this the same way
     /// `Calls` wires `route_update` for classic group calls.
@@ -468,18 +486,80 @@ impl ConferenceCall {
                             };
                             let _ = reply.send(result);
                         }
-                        Command::Play { media, reply } => {
-                            has_video = media.camera.is_some() || media.screen.is_some();
-                            let result = ntg
-                                .set_stream_sources(ntg_id, StreamMode::Capture, &media)
-                                .await
-                                .map_err(TgCallsError::from);
-                            if result.is_ok() {
-                                current = media;
-                                *media_mirror.lock().unwrap() = current.clone();
-                                push_media_state(&sync, &client, &ntg, ntg_id, &active_call).await;
-                            }
+                        Command::SetSources { mode, media, reply } => {
+                            let result = if state != ConferenceState::Joined {
+                                Err(TgCallsError::NotJoined)
+                            } else {
+                                let result = ntg
+                                    .set_stream_sources(ntg_id, mode, &media)
+                                    .await
+                                    .map_err(TgCallsError::from);
+                                // Only what you send changes the media state
+                                // Telegram shows; playback targets don't.
+                                if result.is_ok() && mode == StreamMode::Capture {
+                                    has_video = media.camera.is_some() || media.screen.is_some();
+                                    current = media;
+                                    *media_mirror.lock().unwrap() = current.clone();
+                                    push_media_state(&sync, &client, &ntg, ntg_id, &active_call)
+                                        .await;
+                                }
+                                result
+                            };
                             let _ = reply.send(result);
+                        }
+                        Command::IncomingVideo {
+                            user_id,
+                            endpoint,
+                            ssrc_groups,
+                            reply,
+                        } => {
+                            let result = if state != ConferenceState::Joined {
+                                Err(TgCallsError::NotJoined)
+                            } else {
+                                ntg.add_incoming_video(ntg_id, user_id, &endpoint, &ssrc_groups)
+                                    .await
+                                    .map_err(TgCallsError::from)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Command::RemoveIncomingVideo { endpoint, reply } => {
+                            let result = if state != ConferenceState::Joined {
+                                Err(TgCallsError::NotJoined)
+                            } else {
+                                ntg.remove_incoming_video(ntg_id, &endpoint)
+                                    .await
+                                    .map_err(TgCallsError::from)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Command::PlayedSeconds { mode, reply } => {
+                            let result = if state != ConferenceState::Joined {
+                                Err(TgCallsError::NotJoined)
+                            } else {
+                                ntg.time(ntg_id, mode).await.map_err(TgCallsError::from)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Command::CallType(reply) => {
+                            let result = if state != ConferenceState::Joined {
+                                Err(TgCallsError::NotJoined)
+                            } else {
+                                ntg.get_call_type(ntg_id).await.map_err(TgCallsError::from)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Command::ConnectionMode(reply) => {
+                            let result = if state != ConferenceState::Joined {
+                                Err(TgCallsError::NotJoined)
+                            } else {
+                                ntg.get_connection_mode(ntg_id)
+                                    .await
+                                    .map_err(TgCallsError::from)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Command::CpuUsage(reply) => {
+                            let _ = reply.send(ntg.cpu_usage().await.map_err(TgCallsError::from));
                         }
                         Command::Control(control, reply) => {
                             let result: Result<(), TgCallsError> = async {
@@ -502,8 +582,8 @@ impl ConferenceCall {
                                     source => {
                                         let mut next = current.clone();
                                         match source {
-                                            Control::Camera(c) => next.camera = c,
-                                            Control::Microphone(m) => next.microphone = m,
+                                            Control::Video(c) => next.camera = c,
+                                            Control::Audio(m) => next.microphone = m,
                                             Control::Screen(sc) => next.screen = sc,
                                             _ => unreachable!("handled above"),
                                         }
@@ -787,7 +867,7 @@ impl ConferenceCall {
     /// this call type is 200 participants).
     ///
     /// `video: None` signals the invitee based on whatever's currently
-    /// playing (from the last `start()`/`play()` - see `media_has_video`).
+    /// playing (from the last `start()`/`set_sources()` - see `media_has_video`).
     /// Pass `Some(v)` to override that for this specific invite - e.g. you
     /// might ring someone as a video call while only actually streaming
     /// audio to the room, or vice versa; the ring hint and your own stream
@@ -804,14 +884,30 @@ impl ConferenceCall {
         rx.await.map_err(|_| TgCallsError::WorkerGone)?
     }
 
-    /// Starts (or replaces) what you're streaming into an already-running
-    /// conference. Useful if you joined with `media: None` and want to
-    /// hold off playback until [`ConferenceEvent::ParticipantsChanged`]
-    /// fires, so you're not playing to an empty room.
-    pub async fn play(&self, media: MediaDescription) -> Result<(), TgCallsError> {
+    /// Replaces everything being captured (`StreamMode::Capture`: mic,
+    /// camera, screen) or played back (`StreamMode::Playback`: where
+    /// incoming audio / video goes, e.g. a recording target) in one call.
+    /// Anything missing from `media` is removed. Useful if you joined with
+    /// `media: None` and want to hold off sending until
+    /// [`ConferenceEvent::ParticipantsChanged`] fires, so you're not
+    /// sending to an empty room. For changing one source and keeping the
+    /// rest, use [`ConferenceCall::set_audio`], [`ConferenceCall::set_video`]
+    /// or [`ConferenceCall::set_screen`].
+    pub async fn set_sources(
+        &self,
+        mode: StreamMode,
+        media: &MediaDescription,
+    ) -> Result<(), TgCallsError> {
+        let media = media.clone();
+        self.ask(|reply| Command::SetSources { mode, media, reply })
+            .await
+    }
+
+    /// Sends a command to the actor thread and waits for its reply.
+    async fn ask<T>(&self, build: impl FnOnce(Reply<T>) -> Command) -> Result<T, TgCallsError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::Play { media, reply })
+            .send(build(reply))
             .map_err(|_| TgCallsError::WorkerGone)?;
         rx.await.map_err(|_| TgCallsError::WorkerGone)?
     }
@@ -845,17 +941,17 @@ impl ConferenceCall {
 
     /// Turns the camera on (`Some`), swaps it, or turns it off (`None`)
     /// without touching the mic or screen.
-    pub async fn set_camera(&self, camera: Option<VideoDescription>) -> Result<(), TgCallsError> {
-        self.control(Control::Camera(camera)).await
+    pub async fn set_video(&self, camera: Option<VideoDescription>) -> Result<(), TgCallsError> {
+        self.control(Control::Video(camera)).await
     }
 
     /// Sets, swaps or removes the outgoing audio source. To silence the
     /// mic while keeping the source, use [`ConferenceCall::mute`].
-    pub async fn set_microphone(
+    pub async fn set_audio(
         &self,
         microphone: Option<AudioDescription>,
     ) -> Result<(), TgCallsError> {
-        self.control(Control::Microphone(microphone)).await
+        self.control(Control::Audio(microphone)).await
     }
 
     /// Starts (`Some`), swaps or stops (`None`) screen sharing.
@@ -910,6 +1006,50 @@ impl ConferenceCall {
             })
             .map_err(|_| TgCallsError::WorkerGone)?;
         rx.await.map_err(|_| TgCallsError::WorkerGone)?
+    }
+
+    /// Subscribes to a remote video stream. `user_id` is whose stream it
+    /// is; same arguments as [`crate::Call::add_incoming_video`].
+    pub async fn add_incoming_video(
+        &self,
+        user_id: i64,
+        endpoint: &str,
+        ssrc_groups: &[SsrcGroup],
+    ) -> Result<u32, TgCallsError> {
+        let endpoint = endpoint.to_owned();
+        let ssrc_groups = ssrc_groups.to_vec();
+        self.ask(|reply| Command::IncomingVideo {
+            user_id,
+            endpoint,
+            ssrc_groups,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn remove_incoming_video(&self, endpoint: &str) -> Result<bool, TgCallsError> {
+        let endpoint = endpoint.to_owned();
+        self.ask(|reply| Command::RemoveIncomingVideo { endpoint, reply })
+            .await
+    }
+
+    /// Seconds of the given stream played so far.
+    pub async fn played_seconds(&self, mode: StreamMode) -> Result<u64, TgCallsError> {
+        self.ask(|reply| Command::PlayedSeconds { mode, reply })
+            .await
+    }
+
+    pub async fn call_type(&self) -> Result<CallType, TgCallsError> {
+        self.ask(Command::CallType).await
+    }
+
+    pub async fn connection_mode(&self) -> Result<ConnectionMode, TgCallsError> {
+        self.ask(Command::ConnectionMode).await
+    }
+
+    /// CPU used by the native call stack, as a fraction of one core.
+    pub async fn cpu_usage(&self) -> Result<f64, TgCallsError> {
+        self.ask(Command::CpuUsage).await
     }
 
     /// Fetches every current participant (paginated internally).
@@ -1318,10 +1458,15 @@ impl ConferenceCalls {
         self.get(chat_id).await?.invite(user_id, video).await
     }
 
-    /// Starts (or replaces) what `chat_id`'s conference is streaming. See
-    /// [`ConferenceCall::play`].
-    pub async fn play(&self, chat_id: i64, media: MediaDescription) -> Result<(), TgCallsError> {
-        self.get(chat_id).await?.play(media).await
+    /// Replaces everything `chat_id`'s conference is capturing or playing
+    /// back. See [`ConferenceCall::set_sources`].
+    pub async fn set_sources(
+        &self,
+        chat_id: i64,
+        mode: StreamMode,
+        media: &MediaDescription,
+    ) -> Result<(), TgCallsError> {
+        self.get(chat_id).await?.set_sources(mode, media).await
     }
 
     pub async fn mute(&self, chat_id: i64) -> Result<(), TgCallsError> {
@@ -1340,20 +1485,20 @@ impl ConferenceCalls {
         self.get(chat_id).await?.resume().await
     }
 
-    pub async fn set_camera(
+    pub async fn set_video(
         &self,
         chat_id: i64,
         camera: Option<VideoDescription>,
     ) -> Result<(), TgCallsError> {
-        self.get(chat_id).await?.set_camera(camera).await
+        self.get(chat_id).await?.set_video(camera).await
     }
 
-    pub async fn set_microphone(
+    pub async fn set_audio(
         &self,
         chat_id: i64,
         microphone: Option<AudioDescription>,
     ) -> Result<(), TgCallsError> {
-        self.get(chat_id).await?.set_microphone(microphone).await
+        self.get(chat_id).await?.set_audio(microphone).await
     }
 
     pub async fn set_screen(
@@ -1385,6 +1530,51 @@ impl ConferenceCalls {
             .await?
             .send_external_frame(device, frame, frame_data)
             .await
+    }
+
+    /// See [`ConferenceCall::add_incoming_video`].
+    pub async fn add_incoming_video(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        endpoint: &str,
+        ssrc_groups: &[SsrcGroup],
+    ) -> Result<u32, TgCallsError> {
+        self.get(chat_id)
+            .await?
+            .add_incoming_video(user_id, endpoint, ssrc_groups)
+            .await
+    }
+
+    pub async fn remove_incoming_video(
+        &self,
+        chat_id: i64,
+        endpoint: &str,
+    ) -> Result<bool, TgCallsError> {
+        self.get(chat_id)
+            .await?
+            .remove_incoming_video(endpoint)
+            .await
+    }
+
+    pub async fn played_seconds(
+        &self,
+        chat_id: i64,
+        mode: StreamMode,
+    ) -> Result<u64, TgCallsError> {
+        self.get(chat_id).await?.played_seconds(mode).await
+    }
+
+    pub async fn call_type(&self, chat_id: i64) -> Result<CallType, TgCallsError> {
+        self.get(chat_id).await?.call_type().await
+    }
+
+    pub async fn connection_mode(&self, chat_id: i64) -> Result<ConnectionMode, TgCallsError> {
+        self.get(chat_id).await?.connection_mode().await
+    }
+
+    pub async fn cpu_usage(&self, chat_id: i64) -> Result<f64, TgCallsError> {
+        self.get(chat_id).await?.cpu_usage().await
     }
 
     /// See [`ConferenceCall::set_volume`].

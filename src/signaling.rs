@@ -167,7 +167,7 @@ pub async fn leave_call(
 /// Telegram so other participants see what is really being sent.
 ///
 /// Two things feed it: ntgcalls' state-change callback and every control
-/// call (`mute`, `set_camera`, `play`, ...) directly. The callback does not
+/// call (`mute`, `set_video`, `set_sources`, ...) directly. The callback does not
 /// reliably fire for every change on every connection, so the direct push
 /// is what guarantees Telegram hears about it. Both paths go through here,
 /// which serializes the requests so they reach Telegram in order, and

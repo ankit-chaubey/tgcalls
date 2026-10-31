@@ -1,5 +1,5 @@
 // Checks the native ntgcalls behavior that tgcalls' single-source controls
-// (set_camera, set_microphone, set_screen) and state sync rely on. Needs
+// (set_video, set_audio, set_screen) and state sync rely on. Needs
 // the real native library but no network or Telegram account.
 use ntgcalls::{MediaDescription, NTgCalls, StreamMode};
 use tgcalls::Media;
@@ -42,7 +42,7 @@ async fn camera_source_flips_video_stopped_and_none_removes_it() {
         .unwrap();
     assert!(!ntg.get_state(CHAT).await.unwrap().video_stopped);
 
-    // This is the rule set_camera(None) depends on: a missing device is removed.
+    // This is the rule set_video(None) depends on: a missing device is removed.
     media.camera = None;
     ntg.set_stream_sources(CHAT, StreamMode::Capture, &media)
         .await
