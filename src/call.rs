@@ -92,8 +92,8 @@ pub struct Call {
     active_call: Option<ferogram::tl::enums::InputGroupCall>,
     presentation_active: bool,
     /// What is currently being captured. ntgcalls replaces the whole
-    /// capture set on every `set_stream_sources`, so single-source changes
-    /// (`set_camera`, `set_microphone`, `set_screen`) start from this.
+    /// capture set on every `set_sources`, so single-source changes
+    /// (`set_video`, `set_audio`, `set_screen`) start from this.
     media: MediaDescription,
     /// Sends our mute / camera / screen state to Telegram. Fresh on every
     /// join, so a rejoin always announces its real state.
@@ -251,6 +251,29 @@ impl Call {
         self.event_handler = Some(handler);
     }
 
+    /// Registers a callback for raw decoded frames: `Capture` is your own
+    /// outgoing audio / video as it is about to be sent, `Playback` is
+    /// someone else's after decoding. Opt-in because ntgcalls only
+    /// delivers frames once a callback is set. Fires on ntgcalls' native
+    /// thread at media rate, so keep it cheap and hand the frames to a
+    /// channel. Call before `join()`. Same shape as
+    /// [`crate::P2PCall::on_frames`].
+    pub fn on_frames(
+        &mut self,
+        callback: impl Fn(i64, StreamMode, StreamDevice, Vec<ntgcalls::Frame>) + Send + Sync + 'static,
+    ) {
+        self.ntg.on_frames(callback);
+    }
+
+    /// Registers a callback for when a remote participant's video source
+    /// appears or disappears. See the note on [`Call::on_frames`].
+    pub fn on_remote_source_change(
+        &mut self,
+        callback: impl Fn(i64, ntgcalls::RemoteSource) + Send + Sync + 'static,
+    ) {
+        self.ntg.on_remote_source_change(callback);
+    }
+
     fn emit(&self, event: CallEvent) {
         if let Some(handler) = &self.event_handler {
             handler(event);
@@ -400,10 +423,7 @@ impl Call {
         Ok(())
     }
 
-    pub async fn join_presentation(
-        &mut self,
-        screen: VideoDescription,
-    ) -> Result<(), TgCallsError> {
+    async fn join_presentation(&mut self, screen: VideoDescription) -> Result<(), TgCallsError> {
         self.require_joined()?;
         if self.presentation_active {
             return Err(TgCallsError::AlreadyJoined);
@@ -453,7 +473,7 @@ impl Call {
         Ok(())
     }
 
-    pub async fn stop_presentation(&mut self) -> Result<(), TgCallsError> {
+    async fn stop_presentation(&mut self) -> Result<(), TgCallsError> {
         self.require_joined()?;
         if !self.presentation_active {
             return Ok(());
@@ -487,7 +507,7 @@ impl Call {
         Ok(())
     }
 
-    pub fn is_presentation_active(&self) -> bool {
+    pub(crate) fn is_presentation_active(&self) -> bool {
         self.presentation_active
     }
 
@@ -556,7 +576,13 @@ impl Call {
             .await?)
     }
 
-    pub async fn set_stream_sources(
+    /// Replaces everything being captured (`StreamMode::Capture`: mic,
+    /// camera, screen) or played back (`StreamMode::Playback`: where
+    /// incoming audio / video goes, e.g. a recording target) in one call.
+    /// Anything missing from `media` is removed. For changing one source
+    /// and keeping the rest, use [`Call::set_audio`], [`Call::set_video`]
+    /// or [`Call::set_screen`].
+    pub async fn set_sources(
         &mut self,
         stream_mode: StreamMode,
         media: &MediaDescription,
@@ -579,24 +605,24 @@ impl Call {
 
     /// Turns the camera on (`Some`), swaps it, or turns it off (`None`)
     /// without touching the mic or screen. Works at any time while joined.
-    pub async fn set_camera(
+    pub async fn set_video(
         &mut self,
         camera: Option<VideoDescription>,
     ) -> Result<(), TgCallsError> {
         let mut media = self.media.clone();
         media.camera = camera;
-        self.set_stream_sources(StreamMode::Capture, &media).await
+        self.set_sources(StreamMode::Capture, &media).await
     }
 
     /// Sets, swaps or removes the outgoing audio source. To silence the
     /// mic while keeping the source, use [`Call::mute`] instead.
-    pub async fn set_microphone(
+    pub async fn set_audio(
         &mut self,
         microphone: Option<AudioDescription>,
     ) -> Result<(), TgCallsError> {
         let mut media = self.media.clone();
         media.microphone = microphone;
-        self.set_stream_sources(StreamMode::Capture, &media).await
+        self.set_sources(StreamMode::Capture, &media).await
     }
 
     /// Starts screen sharing (`Some`), swaps the shared source, or stops
@@ -609,7 +635,7 @@ impl Call {
             Some(s) if self.presentation_active => {
                 let mut media = self.media.clone();
                 media.screen = Some(s);
-                self.set_stream_sources(StreamMode::Capture, &media).await
+                self.set_sources(StreamMode::Capture, &media).await
             }
             Some(s) => self.join_presentation(s).await,
             None => {
@@ -617,7 +643,7 @@ impl Call {
                 if self.media.screen.is_some() {
                     let mut media = self.media.clone();
                     media.screen = None;
-                    self.set_stream_sources(StreamMode::Capture, &media).await?;
+                    self.set_sources(StreamMode::Capture, &media).await?;
                 }
                 Ok(())
             }
@@ -660,13 +686,6 @@ impl Call {
         self.sync
             .refresh(&self.client, call, &self.ntg, ntg_chat_id(self.chat_id))
             .await
-    }
-
-    /// Starts recording using a [`crate::Media::record_audio`]/[`crate::Media::record_video`]/
-    /// [`crate::Media::record_screen`] description. Shorthand for
-    /// `set_stream_sources(StreamMode::Playback, media)`.
-    pub async fn record(&mut self, media: &MediaDescription) -> Result<(), TgCallsError> {
-        self.set_stream_sources(StreamMode::Playback, media).await
     }
 
     pub async fn cpu_usage(&mut self) -> Result<f64, TgCallsError> {

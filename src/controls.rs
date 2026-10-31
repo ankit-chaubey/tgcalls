@@ -1,11 +1,11 @@
 //! One set of controls for every kind of call.
 //!
 //! [`Call`](crate::Call), [`P2PCall`](crate::P2PCall) and
-//! [`ConferenceCall`](crate::ConferenceCall) all have the same mid-call
-//! controls under the same names, but not the same receivers (`Call` takes
+//! [`ConferenceCall`](crate::ConferenceCall) have the same mid-call controls
+//! under the same names, but not the same receivers (`Call` takes
 //! `&mut self`, the others `&self`). [`CallControls`] puts them behind one
-//! trait, so code that only needs to mute, switch the camera or share the
-//! screen works with any of them:
+//! trait, so code that only needs to mute, switch video or share the screen
+//! works with any of them:
 //!
 //! ```no_run
 //! use tgcalls::{CallControls, Media, TgCallsError};
@@ -16,6 +16,22 @@
 //!     call.set_screen(Some(Media::screen(1280, 720, 30))).await
 //! }
 //! ```
+//!
+//! # What each control means
+//!
+//! The controls follow ntgcalls' own model, one name per operation:
+//!
+//! | Slot | Sends / receives | Method |
+//! |---|---|---|
+//! | Microphone | the audio you send | `set_audio` |
+//! | Camera | the video you send | `set_video` |
+//! | Screen | a second, separate video track | `set_screen` |
+//! | Speaker | where incoming audio goes (playback mode) | `set_sources(Playback, ..)` |
+//!
+//! `set_sources` replaces the whole set in one call; the three single-slot
+//! setters change one slot and keep the rest. The slot names `microphone`
+//! and `camera` still appear on `MediaDescription`, which belongs to
+//! ntgcalls; `set_audio` fills `microphone` and `set_video` fills `camera`.
 //!
 //! The futures it returns are not `Send`: `ntgcalls::NTgCalls` isn't `Sync`
 //! (see the top of `calls.rs`), so a `Call` or `P2PCall` has to stay on one
@@ -35,15 +51,16 @@ use std::future::Future;
 use std::sync::Arc;
 
 use ntgcalls::{
-    AudioDescription, FrameData, MediaDescription, MediaState, StreamDevice, VideoDescription,
+    AudioDescription, CallType, ConnectionMode, FrameData, MediaDescription, MediaState, SsrcGroup,
+    StreamDevice, StreamMode, VideoDescription,
 };
 
 use crate::error::TgCallsError;
 use crate::{Call, ConferenceCall, P2PCall};
 
 /// Mid-call controls shared by every call type. Every method works at any
-/// time while the call is up, in any order, and changing one source keeps
-/// the others (turning the camera on never drops the mic).
+/// time while the call is up, in any order, and changing one slot keeps the
+/// others (turning video on never drops the audio).
 pub trait CallControls {
     /// Silences the mic and keeps its source.
     fn mute(&mut self) -> impl Future<Output = Result<(), TgCallsError>>;
@@ -55,26 +72,37 @@ pub trait CallControls {
 
     fn resume(&mut self) -> impl Future<Output = Result<(), TgCallsError>>;
 
-    /// Camera on (`Some`), swapped, or off (`None`).
-    fn set_camera(
+    /// Sets, swaps (`Some`) or removes (`None`) the audio you send. To
+    /// silence it while keeping the source, use [`CallControls::mute`].
+    fn set_audio(
         &mut self,
-        camera: Option<VideoDescription>,
+        audio: Option<AudioDescription>,
     ) -> impl Future<Output = Result<(), TgCallsError>>;
 
-    /// Sets, swaps or removes the outgoing audio source. To silence the mic
-    /// while keeping the source, use [`CallControls::mute`].
-    fn set_microphone(
+    /// Your video track on (`Some`), swapped, or off (`None`). Screen share
+    /// is separate: see [`CallControls::set_screen`].
+    fn set_video(
         &mut self,
-        microphone: Option<AudioDescription>,
+        video: Option<VideoDescription>,
     ) -> impl Future<Output = Result<(), TgCallsError>>;
 
-    /// Screen share on (`Some`), swapped, or off (`None`).
+    /// Screen share on (`Some`), swapped, or off (`None`). A separate track
+    /// from [`CallControls::set_video`]; both can run at once.
     fn set_screen(
         &mut self,
         screen: Option<VideoDescription>,
     ) -> impl Future<Output = Result<(), TgCallsError>>;
 
-    /// Current mute / pause / camera / screen flags.
+    /// Replaces everything being captured (`StreamMode::Capture`) or played
+    /// back (`StreamMode::Playback`, e.g. a recording target) in one call.
+    /// Anything missing from `media` is removed.
+    fn set_sources(
+        &mut self,
+        mode: StreamMode,
+        media: &MediaDescription,
+    ) -> impl Future<Output = Result<(), TgCallsError>>;
+
+    /// Current mute / pause / video / screen flags.
     fn media_state(&mut self) -> impl Future<Output = Result<MediaState, TgCallsError>>;
 
     /// What is currently being captured (mic, camera, screen).
@@ -89,6 +117,32 @@ pub trait CallControls {
         frame: &[u8],
         frame_data: &FrameData,
     ) -> impl Future<Output = Result<(), TgCallsError>>;
+
+    /// Subscribes to a remote video stream. `user_id` is whose it is.
+    fn add_incoming_video(
+        &mut self,
+        user_id: i64,
+        endpoint: &str,
+        ssrc_groups: &[SsrcGroup],
+    ) -> impl Future<Output = Result<u32, TgCallsError>>;
+
+    fn remove_incoming_video(
+        &mut self,
+        endpoint: &str,
+    ) -> impl Future<Output = Result<bool, TgCallsError>>;
+
+    /// Seconds of the given stream played so far.
+    fn played_seconds(
+        &mut self,
+        mode: StreamMode,
+    ) -> impl Future<Output = Result<u64, TgCallsError>>;
+
+    fn call_type(&mut self) -> impl Future<Output = Result<CallType, TgCallsError>>;
+
+    fn connection_mode(&mut self) -> impl Future<Output = Result<ConnectionMode, TgCallsError>>;
+
+    /// CPU used by the native call stack, as a fraction of one core.
+    fn cpu_usage(&mut self) -> impl Future<Output = Result<f64, TgCallsError>>;
 }
 
 impl CallControls for Call {
@@ -104,23 +158,30 @@ impl CallControls for Call {
     fn resume(&mut self) -> impl Future<Output = Result<(), TgCallsError>> {
         Call::resume(self)
     }
-    fn set_camera(
+    fn set_audio(
         &mut self,
-        camera: Option<VideoDescription>,
+        audio: Option<AudioDescription>,
     ) -> impl Future<Output = Result<(), TgCallsError>> {
-        Call::set_camera(self, camera)
+        Call::set_audio(self, audio)
     }
-    fn set_microphone(
+    fn set_video(
         &mut self,
-        microphone: Option<AudioDescription>,
+        video: Option<VideoDescription>,
     ) -> impl Future<Output = Result<(), TgCallsError>> {
-        Call::set_microphone(self, microphone)
+        Call::set_video(self, video)
     }
     fn set_screen(
         &mut self,
         screen: Option<VideoDescription>,
     ) -> impl Future<Output = Result<(), TgCallsError>> {
         Call::set_screen(self, screen)
+    }
+    fn set_sources(
+        &mut self,
+        mode: StreamMode,
+        media: &MediaDescription,
+    ) -> impl Future<Output = Result<(), TgCallsError>> {
+        Call::set_sources(self, mode, media)
     }
     fn media_state(&mut self) -> impl Future<Output = Result<MediaState, TgCallsError>> {
         Call::media_state(self)
@@ -135,6 +196,35 @@ impl CallControls for Call {
         frame_data: &FrameData,
     ) -> impl Future<Output = Result<(), TgCallsError>> {
         Call::send_external_frame(self, device, frame, frame_data)
+    }
+    fn add_incoming_video(
+        &mut self,
+        user_id: i64,
+        endpoint: &str,
+        ssrc_groups: &[SsrcGroup],
+    ) -> impl Future<Output = Result<u32, TgCallsError>> {
+        Call::add_incoming_video(self, user_id, endpoint, ssrc_groups)
+    }
+    fn remove_incoming_video(
+        &mut self,
+        endpoint: &str,
+    ) -> impl Future<Output = Result<bool, TgCallsError>> {
+        Call::remove_incoming_video(self, endpoint)
+    }
+    fn played_seconds(
+        &mut self,
+        mode: StreamMode,
+    ) -> impl Future<Output = Result<u64, TgCallsError>> {
+        Call::played_seconds(self, mode)
+    }
+    fn call_type(&mut self) -> impl Future<Output = Result<CallType, TgCallsError>> {
+        Call::call_type(self)
+    }
+    fn connection_mode(&mut self) -> impl Future<Output = Result<ConnectionMode, TgCallsError>> {
+        Call::connection_mode(self)
+    }
+    fn cpu_usage(&mut self) -> impl Future<Output = Result<f64, TgCallsError>> {
+        Call::cpu_usage(self)
     }
 }
 
@@ -155,23 +245,30 @@ macro_rules! shared_ref_controls {
             fn resume(&mut self) -> impl Future<Output = Result<(), TgCallsError>> {
                 <$inner>::resume($get(&*self))
             }
-            fn set_camera(
+            fn set_audio(
                 &mut self,
-                camera: Option<VideoDescription>,
+                audio: Option<AudioDescription>,
             ) -> impl Future<Output = Result<(), TgCallsError>> {
-                <$inner>::set_camera($get(&*self), camera)
+                <$inner>::set_audio($get(&*self), audio)
             }
-            fn set_microphone(
+            fn set_video(
                 &mut self,
-                microphone: Option<AudioDescription>,
+                video: Option<VideoDescription>,
             ) -> impl Future<Output = Result<(), TgCallsError>> {
-                <$inner>::set_microphone($get(&*self), microphone)
+                <$inner>::set_video($get(&*self), video)
             }
             fn set_screen(
                 &mut self,
                 screen: Option<VideoDescription>,
             ) -> impl Future<Output = Result<(), TgCallsError>> {
                 <$inner>::set_screen($get(&*self), screen)
+            }
+            fn set_sources(
+                &mut self,
+                mode: StreamMode,
+                media: &MediaDescription,
+            ) -> impl Future<Output = Result<(), TgCallsError>> {
+                <$inner>::set_sources($get(&*self), mode, media)
             }
             fn media_state(&mut self) -> impl Future<Output = Result<MediaState, TgCallsError>> {
                 <$inner>::media_state($get(&*self))
@@ -186,6 +283,37 @@ macro_rules! shared_ref_controls {
                 frame_data: &FrameData,
             ) -> impl Future<Output = Result<(), TgCallsError>> {
                 <$inner>::send_external_frame($get(&*self), device, frame, frame_data)
+            }
+            fn add_incoming_video(
+                &mut self,
+                user_id: i64,
+                endpoint: &str,
+                ssrc_groups: &[SsrcGroup],
+            ) -> impl Future<Output = Result<u32, TgCallsError>> {
+                <$inner>::add_incoming_video($get(&*self), user_id, endpoint, ssrc_groups)
+            }
+            fn remove_incoming_video(
+                &mut self,
+                endpoint: &str,
+            ) -> impl Future<Output = Result<bool, TgCallsError>> {
+                <$inner>::remove_incoming_video($get(&*self), endpoint)
+            }
+            fn played_seconds(
+                &mut self,
+                mode: StreamMode,
+            ) -> impl Future<Output = Result<u64, TgCallsError>> {
+                <$inner>::played_seconds($get(&*self), mode)
+            }
+            fn call_type(&mut self) -> impl Future<Output = Result<CallType, TgCallsError>> {
+                <$inner>::call_type($get(&*self))
+            }
+            fn connection_mode(
+                &mut self,
+            ) -> impl Future<Output = Result<ConnectionMode, TgCallsError>> {
+                <$inner>::connection_mode($get(&*self))
+            }
+            fn cpu_usage(&mut self) -> impl Future<Output = Result<f64, TgCallsError>> {
+                <$inner>::cpu_usage($get(&*self))
             }
         }
     };

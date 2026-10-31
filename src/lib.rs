@@ -31,18 +31,26 @@
 //! |---|---|
 //! | Mic off / on | `mute()` / `unmute()` |
 //! | Pause / resume the stream | `pause()` / `resume()` |
-//! | Camera on, swap, off | `set_camera(Some(..))` / `set_camera(None)` |
-//! | Mic source set, swap, removed | `set_microphone(Some(..))` / `set_microphone(None)` |
-//! | Screen share on, swap, off | `set_screen(Some(..))` / `set_screen(None)` |
-//! | Current state | `media_state()` |
+//! | Audio you send: set, swap, remove | `set_audio(Some(..))` / `set_audio(None)` |
+//! | Video you send: on, swap, off | `set_video(Some(..))` / `set_video(None)` |
+//! | Screen share: on, swap, off | `set_screen(Some(..))` / `set_screen(None)` |
+//! | Replace everything at once (send or playback) | `set_sources(mode, &media)` |
+//! | Raw frames in | `send_external_frame(..)` |
+//! | Remote video | `add_incoming_video(..)` / `remove_incoming_video(..)` |
+//! | State and info | `media_state()`, `current_media()`, `played_seconds(mode)`, `call_type()`, `connection_mode()`, `cpu_usage()` |
+//!
+//! These are the same operations ntgcalls has, one name each: four slots
+//! (microphone, speaker, camera, screen) in two modes (`Capture` sends,
+//! `Playback` receives or records). See [`CallControls`] for what each slot
+//! is.
 //!
 //! [`Calls`] and [`ConferenceCalls`] take a `chat_id` first. [`Calls`] also
-//! has `play_media(chat_id, MediaDescription)` to switch to any mix of
-//! sources in one call, `status()` for a one-call snapshot and `chats()`
-//! for the tracked chats. Changes to a single source keep the others, so
-//! turning the camera on never drops the mic.
+//! has `play`, `play_media` and `seek` for queued playback with progress,
+//! `record`, `status()` for a one-call snapshot and `chats()` for the
+//! tracked chats. Changes to a single slot keep the others, so turning
+//! video on never drops the audio.
 //!
-//! Use `mute()` to silence the mic and keep the source. `set_microphone(None)`
+//! Use `mute()` to silence the mic and keep the source. `set_audio(None)`
 //! removes the source entirely.
 //!
 //! For group calls, [`CallEvent::MediaStateChanged`] fires on every change,

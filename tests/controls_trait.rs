@@ -19,6 +19,6 @@ fn every_call_type_implements_call_controls() {
 #[allow(dead_code)]
 async fn hush_and_hide(call: &mut impl CallControls) -> Result<(), tgcalls::TgCallsError> {
     call.mute().await?;
-    call.set_camera(None).await?;
+    call.set_video(None).await?;
     call.set_screen(None).await
 }

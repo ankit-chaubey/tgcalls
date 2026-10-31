@@ -27,13 +27,13 @@ async fn main() -> Result<()> {
     println!("joined group call.");
 
     let screen = Media::screen(1280, 720, 30);
-    call.join_presentation(screen).await?;
+    call.set_screen(Some(screen)).await?;
     println!("presentation started. Press Enter to stop.");
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
 
-    call.stop_presentation().await?;
+    call.set_screen(None).await?;
     println!("presentation stopped.");
 
     call.leave().await?;
