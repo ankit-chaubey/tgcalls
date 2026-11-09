@@ -94,38 +94,6 @@ Direct, one-on-one calls work the same way in spirit, ring someone, exchange key
 
 Video and screen share follow the same pattern, `Media::video`, `Media::av`, and `Media::screen` build the right ffmpeg pipeline for you. The `examples/` folder has a short, working file for each of these, that's genuinely the fastest way to see how it all fits together.
 
-## Controls
-
-Every call type (group, private, conference) has the same controls, with the same names, and you can use them at any time while the call is up:
-
-```rust
-calls.mute(chat_id).await?;                                  // mic off
-calls.unmute(chat_id).await?;                                // mic on
-calls.pause(chat_id).await?;                                 // pause the stream
-calls.resume(chat_id).await?;
-calls.set_video(chat_id, Some(video)).await?;                // video on, or swap it
-calls.set_video(chat_id, None).await?;                       // video off
-calls.set_audio(chat_id, Some(audio)).await?;                // audio source on, or swap it
-calls.set_audio(chat_id, None).await?;                       // remove the audio source
-calls.set_screen(chat_id, Some(Media::screen(1280, 720, 30))).await?;  // share screen
-calls.set_screen(chat_id, None).await?;                      // stop sharing
-calls.set_sources(chat_id, StreamMode::Capture, &media).await?;        // replace everything at once
-let state = calls.media_state(chat_id).await?;               // muted, video paused, ...
-```
-
-These are the operations ntgcalls itself has, one name each:
-
-| Slot | What it is | Method |
-|---|---|---|
-| Microphone | the audio you send (a file, a device or raw frames) | `set_audio` |
-| Camera | the video you send | `set_video` |
-| Screen | a second, separate video track, can run alongside the camera | `set_screen` |
-| Speaker | where incoming audio goes, for recording | `set_sources(StreamMode::Playback, ..)` |
-
-`mute` silences the mic and keeps its source; `set_audio(None)` removes the source. `pause` stops the whole outgoing stream.
-
-Changing one slot keeps the others, and your state is pushed to Telegram automatically, so other participants see it. `Call`, `P2PCall` and `ConferenceCall` use the same method names without the `chat_id`, and all three implement the `CallControls` trait, so a function written against `impl CallControls` works with any of them. Raw frames in and out (`send_external_frame`, `on_frames`), remote video (`add_incoming_video`, `remove_incoming_video`) and info (`played_seconds`, `call_type`, `connection_mode`, `cpu_usage`) are on every call type too. `examples/call_controls.rs` drives the controls from the terminal.
-
 ## Credits
 
 TgCalls wouldn't exist without these projects and the people behind them.
