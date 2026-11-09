@@ -1,9 +1,11 @@
 use ntgcalls::{
-    ConnectionInfo, ConnectionState, DhConfig, MediaDescription, NTgCalls, RTCServer, StreamMode,
+    AudioDescription, CallType, ConnectionInfo, ConnectionMode, ConnectionState, DhConfig,
+    MediaDescription, MediaState, NTgCalls, RTCServer, StreamMode, VideoDescription,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::call::no_media;
 use crate::error::TgCallsError;
 use crate::signaling;
 
@@ -32,6 +34,14 @@ pub struct P2PCall {
     state: P2PCallState,
     call_id: Option<i64>,
     call_access_hash: Option<i64>,
+    /// Current capture sources. ntgcalls replaces the whole set on every
+    /// `set_stream_sources`, so single-source changes start from this.
+    media: std::sync::Mutex<MediaDescription>,
+    /// Held across a whole read-modify-write of `media`, so two concurrent
+    /// single-source changes (say `set_video` and `set_audio` from
+    /// different tasks) can't each start from the same snapshot and have
+    /// one overwrite the other.
+    media_gate: tokio::sync::Mutex<()>,
 }
 
 impl P2PCall {
@@ -43,6 +53,8 @@ impl P2PCall {
             state: P2PCallState::Idle,
             call_id: None,
             call_access_hash: None,
+            media: std::sync::Mutex::new(no_media()),
+            media_gate: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -360,8 +372,13 @@ impl P2PCall {
         }
     }
 
-    /// Set audio/video sources. Call after run_signaling() returns true.
-    pub async fn set_media(
+    /// Replaces everything being captured (`StreamMode::Capture`) or played
+    /// back (`StreamMode::Playback`, e.g. a recording target) in one call.
+    /// Anything missing from `media` is removed. Call after
+    /// `run_signaling()` returns true. To change one source and keep the
+    /// rest, use [`P2PCall::set_audio`], [`P2PCall::set_video`] or
+    /// [`P2PCall::set_screen`].
+    pub async fn set_sources(
         &self,
         stream_mode: StreamMode,
         media: &MediaDescription,
@@ -369,10 +386,108 @@ impl P2PCall {
         if matches!(self.state, P2PCallState::Idle | P2PCallState::Ended) {
             return Err(TgCallsError::P2PNotActive);
         }
-        Ok(self
-            .ntg
+        self.ntg
             .set_stream_sources(self.user_id, stream_mode, media)
-            .await?)
+            .await?;
+        if stream_mode == StreamMode::Capture {
+            *self.media.lock().unwrap() = media.clone();
+        }
+        Ok(())
+    }
+
+    /// Turns the camera on (`Some`), swaps it, or turns it off (`None`)
+    /// without touching the mic or screen. Works at any time during the call.
+    pub async fn set_video(&self, camera: Option<VideoDescription>) -> Result<(), TgCallsError> {
+        self.update_media(|m| m.camera = camera).await
+    }
+
+    /// Sets, swaps or removes the outgoing audio source. To silence the
+    /// mic while keeping the source, use [`P2PCall::mute`] instead.
+    pub async fn set_audio(
+        &self,
+        microphone: Option<AudioDescription>,
+    ) -> Result<(), TgCallsError> {
+        self.update_media(|m| m.microphone = microphone).await
+    }
+
+    /// Starts (`Some`), swaps or stops (`None`) screen sharing.
+    pub async fn set_screen(&self, screen: Option<VideoDescription>) -> Result<(), TgCallsError> {
+        self.update_media(|m| m.screen = screen).await
+    }
+
+    /// Changes one source and keeps the rest. See `media_gate`.
+    async fn update_media(
+        &self,
+        change: impl FnOnce(&mut MediaDescription),
+    ) -> Result<(), TgCallsError> {
+        let _gate = self.media_gate.lock().await;
+        let mut media = self.media.lock().unwrap().clone();
+        change(&mut media);
+        self.set_sources(StreamMode::Capture, &media).await
+    }
+
+    /// What is currently being captured (mic, camera, screen).
+    pub fn current_media(&self) -> MediaDescription {
+        self.media.lock().unwrap().clone()
+    }
+
+    fn require_active(&self) -> Result<(), TgCallsError> {
+        if matches!(self.state, P2PCallState::Idle | P2PCallState::Ended) {
+            return Err(TgCallsError::P2PNotActive);
+        }
+        Ok(())
+    }
+
+    /// Silences the mic. The other side is told by ntgcalls itself.
+    pub async fn mute(&self) -> Result<(), TgCallsError> {
+        self.require_active()?;
+        self.ntg.mute(self.user_id).await?;
+        Ok(())
+    }
+
+    pub async fn unmute(&self) -> Result<(), TgCallsError> {
+        self.require_active()?;
+        self.ntg.unmute(self.user_id).await?;
+        Ok(())
+    }
+
+    /// Pauses the outgoing stream (audio and video).
+    pub async fn pause(&self) -> Result<(), TgCallsError> {
+        self.require_active()?;
+        self.ntg.pause(self.user_id).await?;
+        Ok(())
+    }
+
+    pub async fn resume(&self) -> Result<(), TgCallsError> {
+        self.require_active()?;
+        self.ntg.resume(self.user_id).await?;
+        Ok(())
+    }
+
+    pub async fn media_state(&self) -> Result<MediaState, TgCallsError> {
+        self.require_active()?;
+        Ok(self.ntg.get_state(self.user_id).await?)
+    }
+
+    /// Seconds of the given stream played so far.
+    pub async fn played_seconds(&self, stream_mode: StreamMode) -> Result<u64, TgCallsError> {
+        self.require_active()?;
+        Ok(self.ntg.time(self.user_id, stream_mode).await?)
+    }
+
+    /// CPU used by the native call stack, as a fraction of one core.
+    pub async fn cpu_usage(&self) -> Result<f64, TgCallsError> {
+        Ok(self.ntg.cpu_usage().await?)
+    }
+
+    pub async fn call_type(&self) -> Result<CallType, TgCallsError> {
+        self.require_active()?;
+        Ok(self.ntg.get_call_type(self.user_id).await?)
+    }
+
+    pub async fn connection_mode(&self) -> Result<ConnectionMode, TgCallsError> {
+        self.require_active()?;
+        Ok(self.ntg.get_connection_mode(self.user_id).await?)
     }
 
     /// Feed incoming signaling bytes from updatePhoneCallSignalingData
@@ -386,17 +501,19 @@ impl P2PCall {
 
     /// P2P calls only ever have one peer, so both `user_id` args are the
     /// same peer this P2PCall was constructed with.
+    /// Subscribes to a remote video stream. `user_id` is whose stream it
+    /// is (the peer, in a private call); same arguments as on
+    /// [`crate::Call::add_incoming_video`], so generic code can use either.
     pub async fn add_incoming_video(
         &self,
+        user_id: i64,
         endpoint: &str,
         ssrc_groups: &[ntgcalls::SsrcGroup],
     ) -> Result<u32, TgCallsError> {
-        if matches!(self.state, P2PCallState::Idle | P2PCallState::Ended) {
-            return Err(TgCallsError::P2PNotActive);
-        }
+        self.require_active()?;
         Ok(self
             .ntg
-            .add_incoming_video(self.user_id, self.user_id, endpoint, ssrc_groups)
+            .add_incoming_video(self.user_id, user_id, endpoint, ssrc_groups)
             .await?)
     }
 
@@ -422,6 +539,26 @@ impl P2PCall {
         self.ntg.on_frames(callback);
     }
 
+    /// Registers a callback for when a stream (or a recording target)
+    /// reaches its end. Same meaning as `CallEvent::StreamEnded` on group
+    /// calls. Fires on ntgcalls' native thread, like the other callbacks.
+    pub fn on_stream_end(
+        &mut self,
+        callback: impl Fn(ntgcalls::StreamType, ntgcalls::StreamDevice) + Send + Sync + 'static,
+    ) {
+        self.ntg
+            .on_stream_end(move |_user_id, stream_type, device| callback(stream_type, device));
+    }
+
+    /// Registers a callback for changes to your own media state (mute,
+    /// camera, screen, pause), the P2P counterpart of
+    /// `CallEvent::MediaStateChanged`. Fires on ntgcalls' native thread, so
+    /// hand the state to a channel or `tokio::spawn` for anything real. The
+    /// other side is told by ntgcalls itself; this is only for your own UI.
+    pub fn on_media_state(&mut self, callback: impl Fn(MediaState) + Send + Sync + 'static) {
+        self.ntg.on_upgrade(move |_user_id, state| callback(state));
+    }
+
     /// See the note on [`P2PCall::on_frames`].
     pub fn on_remote_source_change(
         &mut self,
@@ -431,7 +568,7 @@ impl P2PCall {
     }
 
     pub async fn send_external_frame(
-        &mut self,
+        &self,
         device: ntgcalls::StreamDevice,
         frame: &[u8],
         frame_data: &ntgcalls::FrameData,
@@ -463,6 +600,7 @@ impl P2PCall {
             }
         }
         self.state = P2PCallState::Ended;
+        *self.media.lock().unwrap() = no_media();
         info!("p2p: ended call with user {}", self.user_id);
     }
 
