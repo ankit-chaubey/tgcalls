@@ -4,7 +4,7 @@
 // middleware, so there's no manual relay loop to write - handy once you're
 // juggling more than one chat's conference at a time.
 //
-// We still wait for `ConferenceEvent::ParticipantsChanged` before playing,
+// We still wait for `ConferenceEvent::ParticipantsChanged` before sending,
 // same as the other example: the invitee can't decrypt anything sent
 // before they've joined and the chain has rekeyed to include them.
 //
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ferogram::filters::Dispatcher;
-use tgcalls::{incoming_conference_call, ConferenceCalls, ConferenceEvent, Media};
+use tgcalls::{incoming_conference_call, ConferenceCalls, ConferenceEvent, Media, StreamMode};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,7 +95,9 @@ async fn main() -> anyhow::Result<()> {
 
     println!("waiting for {invitee} to actually join before streaming (Ctrl+C to give up)...");
     joined_rx.recv().await;
-    conferences.play(chat_id, Media::audio(&path)).await?;
+    conferences
+        .set_sources(chat_id, StreamMode::Capture, &Media::audio(&path))
+        .await?;
     println!("{invitee} joined, now streaming {path}");
 
     println!("press Enter to hang up.");

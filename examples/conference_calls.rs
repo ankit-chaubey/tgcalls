@@ -6,7 +6,7 @@
 // chain, so audio sent too early would just encrypt to a key they can't
 // derive yet. `ConferenceEvent::ParticipantsChanged` is the signal that
 // someone joined at the WebRTC level, so we wait for that before calling
-// `play`.
+// `set_sources`.
 //
 // We also relay `UpdateGroupCallChainBlocks` from the raw update stream
 // back into the conference - that's what lets the E2E chain move forward
@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tgcalls::{ConferenceCall, ConferenceEvent, ConferenceTarget, Media};
+use tgcalls::{ConferenceCall, ConferenceEvent, ConferenceTarget, Media, StreamMode};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -98,7 +98,9 @@ async fn main() -> anyhow::Result<()> {
 
     println!("waiting for {invitee} to actually join before streaming (Ctrl+C to give up)...");
     joined_rx.recv().await;
-    conference.play(Media::audio(&path)).await?;
+    conference
+        .set_sources(StreamMode::Capture, &Media::audio(&path))
+        .await?;
     println!("{invitee} joined, now streaming {path}");
 
     println!("press Enter to hang up.");

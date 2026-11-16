@@ -607,7 +607,7 @@ impl Media {
     }
 
     /// Records the call's incoming audio to `path` (encoded by ffmpeg from
-    /// raw PCM). Pass to `Call::set_stream_sources`/`Call::record` with
+    /// raw PCM). Pass to `set_sources` (on any call type) with
     /// `StreamMode::Playback`, not `Capture` - same field, opposite
     /// direction, controlled entirely by the mode you pass.
     pub fn record_audio(path: impl Into<String>) -> MediaDescription {

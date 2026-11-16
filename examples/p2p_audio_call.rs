@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let (mut sig_out_rx, mut conn_rx) = call.connect(&servers, &versions, true).await?;
 
     // Configure audio before signaling completes so encoder is ready immediately.
-    call.set_media(StreamMode::Capture, &media).await?;
+    call.set_sources(StreamMode::Capture, &media).await?;
 
     println!("exchanging signaling...");
     let connected = call
