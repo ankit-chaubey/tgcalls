@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ferogram::tl;
 use ntgcalls::{
@@ -57,6 +57,19 @@ pub enum CallEvent {
     /// a method on this `Call` or from the stream itself. Already pushed to
     /// Telegram by the time this fires.
     MediaStateChanged(MediaState),
+    /// A text message was posted in the call's live chat. Messages you send
+    /// yourself with [`Call::send_message`] come back here too, with
+    /// `is_self: true`.
+    Message {
+        /// Telegram's id for the message, unique within the call.
+        id: i32,
+        /// Sender, when it is a user (not a channel or chat posting as itself).
+        from_user_id: Option<i64>,
+        /// Unix timestamp.
+        date: i32,
+        text: String,
+        from_admin: bool,
+    },
 }
 
 type EventHandler = Arc<dyn Fn(CallEvent) + Send + Sync>;
@@ -891,6 +904,52 @@ impl Call {
 
     pub fn state(&self) -> CallState {
         self.state
+    }
+
+    /// Posts a text message in this call's live chat. Plain group / voice
+    /// chats only: conferences use end-to-end encrypted messages instead.
+    pub async fn send_message(&mut self, text: impl Into<String>) -> Result<(), TgCallsError> {
+        self.require_joined()?;
+        let call = self.active_call.clone().ok_or(TgCallsError::NotJoined)?;
+        let random_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        self.client
+            .invoke(&tl::functions::phone::SendGroupCallMessage {
+                call,
+                random_id,
+                message: tl::enums::TextWithEntities::TextWithEntities(
+                    tl::types::TextWithEntities {
+                        text: text.into(),
+                        entities: Vec::new(),
+                    },
+                ),
+                allow_paid_stars: None,
+                send_as: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Turns an `UpdateGroupCallMessage` into a [`CallEvent::Message`] if it
+    /// belongs to this call. [`crate::Calls`] wires this for you.
+    pub fn handle_call_message(&mut self, u: &tl::types::UpdateGroupCallMessage) {
+        let tl::enums::InputGroupCall::InputGroupCall(g) = &u.call else {
+            return;
+        };
+        if self.group_call_id() != Some(g.id) {
+            return;
+        }
+        let tl::enums::GroupCallMessage::GroupCallMessage(m) = &u.message;
+        let tl::enums::TextWithEntities::TextWithEntities(t) = &m.message;
+        self.emit(CallEvent::Message {
+            id: m.id,
+            from_user_id: peer_user_id(&m.from_id),
+            date: m.date,
+            text: t.text.clone(),
+            from_admin: m.from_admin,
+        });
     }
 
     /// The active group call's raw ID, used by [`crate::Calls`] to route
