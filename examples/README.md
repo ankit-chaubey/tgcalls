@@ -110,7 +110,7 @@ cargo run --example call_bitrate -- -1001234567890 /path/to/song.mp3 64000
 
 A rough guide: 24000 to 32000 is fine for voice, 64000 is good for music, 128000 and up is high quality. Changing it swaps the microphone source, so the track restarts from the beginning.
 
-> Needs ntgcalls `3.1.0-alpha01` or newer, which is what this version of tgcalls pins.
+> Needs ntgcalls `3.1.0-alpha01` or newer, which is what this version of tgcalls pins (it's on `3.1.0-beta01` now).
 
 ### `call_messages.rs`
 
@@ -122,7 +122,7 @@ cargo run --example call_messages -- -1001234567890 /path/to/song.mp3
 
 > Messages are only delivered if `Calls` is registered as middleware on a `Dispatcher`. The example already does this. If you build your own userbot or client and never see `CallEvent::Message`, that's the first thing to check.
 
-This is for regular voice chats. Conference calls are end-to-end encrypted and need ntgcalls' encrypt and decrypt functions, which aren't published yet, so messages there aren't supported for now.
+This is for regular voice chats. Conference calls use encrypted messages instead, see [`conference_messages`](#conference_messagesrs).
 
 ---
 
@@ -212,6 +212,16 @@ Rings the user as a **video** call, then streams a video file once they join. On
 cargo run --example conference_video_calls -- -1001234567890 123456789 /path/to/video.mp4 1280 720 30
 ```
 
+### `conference_messages.rs`
+
+The chat side of a conference. Starts one, rings a user, then prints every message they send and sends whatever you type. Messages are end-to-end encrypted with the call's key (ntgcalls does the encrypting), so only people in the conference can read them. Nothing is streamed.
+
+```
+cargo run --example conference_messages -- -1001234567890 123456789
+```
+
+> Like [`call_messages`](#call_messagesrs), this needs the manager registered as middleware on a `Dispatcher`, which the example already does. Needs ntgcalls `3.1.0-beta01` or newer.
+
 ---
 
 ## Which one: `Call`, `Calls`, or the conference types?
@@ -251,3 +261,4 @@ The controls (mute, pause, camera, screen, and so on) are named the same on all 
 | `conference_calls` | `ConferenceCall` | `chat_id`, `user_id`, file | encrypted conference, audio |
 | `conference_calls_managed` | `ConferenceCalls` | `chat_id`, `user_id`, file | same, through the manager |
 | `conference_video_calls` | `ConferenceCall` | `chat_id`, `user_id`, file | encrypted conference, video |
+| `conference_messages` | `ConferenceCalls` | `chat_id`, `user_id` | read and send encrypted conference messages |

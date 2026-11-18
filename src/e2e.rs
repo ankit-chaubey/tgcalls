@@ -114,6 +114,15 @@ pub enum ConferenceEvent {
     /// Your own mute / pause / camera / screen state changed. Pushed to
     /// Telegram on a best-effort basis (failures are logged, not fatal).
     MediaStateChanged(MediaState),
+    /// A message from another participant, already decrypted. Conference
+    /// messages are end-to-end encrypted by ntgcalls with the call's key,
+    /// so only people currently in the conference can read them. `data` is
+    /// the raw decrypted payload; messages sent with
+    /// [`ConferenceCall::send_message`] are UTF-8 text, see
+    /// [`ConferenceEvent::message_text`]. Needs the conference to be
+    /// registered as middleware ([`ConferenceCalls`]) or fed by hand with
+    /// [`ConferenceCall::apply_encrypted_message`].
+    Message { from_user_id: i64, data: Vec<u8> },
 }
 
 /// What to do when starting a [`ConferenceCall`].
@@ -211,6 +220,15 @@ enum Command {
         user_id: i64,
         volume: i32,
         reply: Reply<()>,
+    },
+    SendMessage {
+        data: Vec<u8>,
+        reply: Reply<()>,
+    },
+    IncomingMessage {
+        call: tl::enums::InputGroupCall,
+        from_user_id: i64,
+        encrypted: Vec<u8>,
     },
     Participants(Reply<Vec<tl::types::GroupCallParticipant>>),
     MediaState(Reply<MediaState>),
@@ -557,6 +575,48 @@ impl ConferenceCall {
                                     .map_err(TgCallsError::from)
                             };
                             let _ = reply.send(result);
+                        }
+                        Command::SendMessage { data, reply } => {
+                            let result = match (&active_call, state == ConferenceState::Joined) {
+                                (Some(call), true) => {
+                                    async {
+                                        let encrypted = ntg.encrypt_message(ntg_id, &data).await?;
+                                        client
+                                        .invoke(
+                                            &tl::functions::phone::SendGroupCallEncryptedMessage {
+                                                call: call.clone(),
+                                                encrypted_message: encrypted,
+                                            },
+                                        )
+                                        .await?;
+                                        Ok(())
+                                    }
+                                    .await
+                                }
+                                _ => Err(TgCallsError::NotJoined),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Command::IncomingMessage {
+                            call,
+                            from_user_id,
+                            encrypted,
+                        } => {
+                            let matches = match (&active_call, &call) {
+                                (
+                                    Some(tl::enums::InputGroupCall::InputGroupCall(a)),
+                                    tl::enums::InputGroupCall::InputGroupCall(b),
+                                ) => a.id == b.id,
+                                _ => false,
+                            };
+                            if matches {
+                                match ntg.decrypt_message(ntg_id, from_user_id, &encrypted).await {
+                                    Ok(data) => {
+                                        handler(ConferenceEvent::Message { from_user_id, data })
+                                    }
+                                    Err(e) => warn!("tgcalls: decrypt_message failed: {}", e),
+                                }
+                            }
                         }
                         Command::CpuUsage(reply) => {
                             let _ = reply.send(ntg.cpu_usage().await.map_err(TgCallsError::from));
@@ -1080,8 +1140,45 @@ impl ConferenceCall {
         });
     }
 
+    /// Sends an end-to-end encrypted text message to everyone in the
+    /// conference. Needs to be joined.
+    pub async fn send_message(&self, text: impl Into<String>) -> Result<(), TgCallsError> {
+        self.send_message_bytes(text.into().into_bytes()).await
+    }
+
+    /// Same as [`ConferenceCall::send_message`] for an arbitrary payload.
+    pub async fn send_message_bytes(&self, data: Vec<u8>) -> Result<(), TgCallsError> {
+        self.ask(|reply| Command::SendMessage { data, reply }).await
+    }
+
+    /// Hands an `UpdateGroupCallEncryptedMessage` from the raw update
+    /// stream to the conference, which decrypts it and fires
+    /// [`ConferenceEvent::Message`] if it belongs to this call. Ignored
+    /// otherwise. [`ConferenceCalls`] does this for you as middleware.
+    pub fn apply_encrypted_message(&self, u: &tl::types::UpdateGroupCallEncryptedMessage) {
+        let Some(from_user_id) = peer_user_id(&u.from_id) else {
+            return;
+        };
+        let _ = self.tx.send(Command::IncomingMessage {
+            call: u.call.clone(),
+            from_user_id,
+            encrypted: u.encrypted_message.clone(),
+        });
+    }
+
     pub fn chat_id(&self) -> i64 {
         self.chat_id
+    }
+}
+
+impl ConferenceEvent {
+    /// For [`ConferenceEvent::Message`]: the payload as text, if it is valid
+    /// UTF-8. `None` for every other event.
+    pub fn message_text(&self) -> Option<String> {
+        match self {
+            ConferenceEvent::Message { data, .. } => String::from_utf8(data.clone()).ok(),
+            _ => None,
+        }
     }
 }
 
@@ -1587,6 +1684,15 @@ impl ConferenceCalls {
         self.get(chat_id).await?.set_volume(user_id, volume).await
     }
 
+    /// See [`ConferenceCall::send_message`].
+    pub async fn send_message(
+        &self,
+        chat_id: i64,
+        text: impl Into<String>,
+    ) -> Result<(), TgCallsError> {
+        self.get(chat_id).await?.send_message(text).await
+    }
+
     /// See [`ConferenceCall::get_participants`].
     pub async fn get_participants(
         &self,
@@ -1654,6 +1760,13 @@ impl ConferenceCalls {
     /// each one checks whether it's actually theirs before acting on it
     /// (see [`ConferenceCall::apply_chain_blocks`]). Runs automatically
     /// once `ConferenceCalls` is registered as middleware.
+    async fn route_encrypted_message(&self, u: &tl::types::UpdateGroupCallEncryptedMessage) {
+        let conferences: Vec<_> = self.active.lock().await.values().cloned().collect();
+        for conference in conferences {
+            conference.apply_encrypted_message(u);
+        }
+    }
+
     async fn route_chain_blocks(&self, u: &tl::types::UpdateGroupCallChainBlocks) {
         let conferences: Vec<_> = self.active.lock().await.values().cloned().collect();
         for conference in conferences {
@@ -1669,6 +1782,9 @@ impl Middleware for ConferenceCalls {
             if let Update::Raw(raw) = &update {
                 if let tl::enums::Update::GroupCallChainBlocks(u) = &raw.inner {
                     conferences.route_chain_blocks(u).await;
+                }
+                if let tl::enums::Update::GroupCallEncryptedMessage(u) = &raw.inner {
+                    conferences.route_encrypted_message(u).await;
                 }
             }
             next.run(update).await
