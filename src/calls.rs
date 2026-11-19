@@ -107,6 +107,8 @@ enum Command {
     IsJoined(oneshot::Sender<bool>),
     RouteUpdate(tl::types::UpdateGroupCallParticipants),
     RouteCallEnded(i64),
+    RouteMessage(tl::types::UpdateGroupCallMessage),
+    SendMessage(String, Reply<()>),
 }
 
 /// A running chat's actor thread - just a channel handle, the `Call` itself
@@ -312,6 +314,10 @@ impl Worker {
                         }
                         Command::RouteCallEnded(discarded_id) => {
                             call.handle_call_ended(discarded_id);
+                        }
+                        Command::RouteMessage(u) => call.handle_call_message(&u),
+                        Command::SendMessage(text, reply) => {
+                            let _ = reply.send(call.send_message(text).await);
                         }
                     }
                 }
@@ -581,6 +587,20 @@ impl Calls {
             .await
     }
 
+    /// Posts a text message in `chat_id`'s call live chat (voice chats only).
+    /// Incoming messages arrive as [`CallEvent::Message`].
+    pub async fn send_message(
+        &self,
+        chat_id: i64,
+        text: impl Into<String>,
+    ) -> Result<(), TgCallsError> {
+        let text = text.into();
+        self.get(chat_id)
+            .await?
+            .send(|r| Command::SendMessage(text, r))
+            .await
+    }
+
     /// Starts screen sharing (`Some`), swaps the shared source, or stops
     /// sharing (`None`).
     pub async fn set_screen(
@@ -761,6 +781,13 @@ impl Calls {
 
     /// Same broadcast-and-let-the-worker-check pattern, for a discarded
     /// group call (the voice chat ending for everyone).
+    async fn route_message(&self, u: &tl::types::UpdateGroupCallMessage) {
+        let workers: Vec<_> = self.active.lock().await.values().cloned().collect();
+        for worker in workers {
+            let _ = worker.tx.send(Command::RouteMessage(u.clone()));
+        }
+    }
+
     async fn route_call_ended(&self, discarded_id: i64) {
         let workers: Vec<_> = self.active.lock().await.values().cloned().collect();
         for worker in workers {
@@ -777,6 +804,9 @@ impl Middleware for Calls {
                 match &raw.inner {
                     tl::enums::Update::GroupCallParticipants(u) => {
                         calls.route_update(u).await;
+                    }
+                    tl::enums::Update::GroupCallMessage(u) => {
+                        calls.route_message(u).await;
                     }
                     tl::enums::Update::GroupCall(u) => {
                         if let tl::enums::GroupCall::Discarded(d) = &u.call {

@@ -372,6 +372,7 @@ impl Media {
                 channel_count: 2,
                 input: audio_cmd(&path, Duration::ZERO),
                 keep_open: false,
+                bitrate: None,
             }),
             speaker: None,
             camera: None,
@@ -391,6 +392,7 @@ impl Media {
                 channel_count: 2,
                 input: audio_cmd(&path, offset),
                 keep_open: false,
+                bitrate: None,
             }),
             speaker: None,
             camera: None,
@@ -407,6 +409,7 @@ impl Media {
                 channel_count: 2,
                 input: path.into(),
                 keep_open: false,
+                bitrate: None,
             }),
             speaker: None,
             camera: None,
@@ -479,6 +482,7 @@ impl Media {
                 channel_count: 2,
                 input: audio_cmd(&audio_path, Duration::ZERO),
                 keep_open: false,
+                bitrate: None,
             }),
             speaker: None,
             camera: Some(VideoDescription {
@@ -512,6 +516,7 @@ impl Media {
                 channel_count: 2,
                 input: audio_cmd(&audio_path, offset),
                 keep_open: false,
+                bitrate: None,
             }),
             speaker: None,
             camera: Some(VideoDescription {
@@ -550,6 +555,28 @@ impl Media {
         }
     }
 
+    /// Sets the outgoing audio bitrate in bits per second (Opus encoder
+    /// target, e.g. `32_000` for voice, `128_000` for music). Applies to the
+    /// microphone of a whole [`MediaDescription`]; a description without a
+    /// microphone is returned unchanged. Audio only - ntgcalls has no video
+    /// bitrate setting.
+    pub fn with_audio_bitrate(
+        mut media: MediaDescription,
+        bits_per_second: u32,
+    ) -> MediaDescription {
+        if let Some(mic) = media.microphone.as_mut() {
+            mic.bitrate = Some(bits_per_second);
+        }
+        media
+    }
+
+    /// Same as [`Media::with_audio_bitrate`], for a bare [`AudioDescription`]
+    /// (what `set_audio` takes).
+    pub fn audio_bitrate(mut audio: AudioDescription, bits_per_second: u32) -> AudioDescription {
+        audio.bitrate = Some(bits_per_second);
+        audio
+    }
+
     /// Audio source fed entirely via `Call::send_external_frame`.
     pub fn external_audio(sample_rate: u32, channels: u8) -> AudioDescription {
         AudioDescription {
@@ -558,6 +585,7 @@ impl Media {
             channel_count: channels,
             input: String::new(),
             keep_open: true,
+            bitrate: None,
         }
     }
 
@@ -575,6 +603,7 @@ impl Media {
             channel_count: 2,
             input: device.metadata.clone(),
             keep_open: true,
+            bitrate: None,
         }
     }
 
@@ -603,6 +632,7 @@ impl Media {
             channel_count: 2,
             input: device.metadata.clone(),
             keep_open: true,
+            bitrate: None,
         }
     }
 
@@ -619,6 +649,7 @@ impl Media {
                 channel_count: 2,
                 input: record_audio_cmd(&path),
                 keep_open: false,
+                bitrate: None,
             }),
             speaker: None,
             camera: None,
