@@ -1,7 +1,7 @@
 <img src="https://raw.githubusercontent.com/ankit-chaubey/tgcalls/main/.github/images/tgcalls.png" alt="tgcalls logo" />
 
 <p align="center">
-    <b>An elegant Rust library for Telegram voice and video calls.</b>
+    <b>An elegant Rust framework for Telegram voice and video calls.</b>
     <br>
     <sub>Powered by <a href="https://github.com/pytgcalls/ntgcalls">ntgcalls</a> and <a href="https://github.com/ankit-chaubey/ferogram">ferogram</a>.</sub>
     <br><br>
@@ -34,7 +34,7 @@ Add `tgcalls` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tgcalls = "=0.4.0-alpha1"
+tgcalls = "=0.4.0-beta1"
 ```
 
 Before using `tgcalls`, make sure you have:
