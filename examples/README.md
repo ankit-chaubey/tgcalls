@@ -120,7 +120,12 @@ Plays media without decoding it. Normally every source is decoded to raw frames 
 cargo run --example passthrough_calls -- -1001234567890 /path/to/video.mp4
 ```
 
-While it plays: `seek <seconds>`, `ogg <file.ogg>` (an Ogg Opus file played straight by ntgcalls, no ffmpeg at all) and `quit`.
+While it plays you can type:
+
+- `seek <seconds>` to restart at that position.
+- `ogg <file.ogg>` to play an Ogg Opus file straight through ntgcalls, no ffmpeg.
+- `mkv <file> <w> <h> <fps> [audio.ogg]` to play a `.mkv` or `.webm` straight through ntgcalls, no ffmpeg. Add an Ogg Opus file at the end if you want sound with it, for example `mkv clip.webm 1280 720 30 clip.ogg`. The video must be H.264, VP8, VP9 or AV1, and the size and fps must match the file.
+- `quit` to leave.
 
 > A source that is already Opus or H.264 is copied untouched, so the video is not rescaled. Anything else is encoded to H.264 inside the 1280x720 box. Needs ntgcalls `4.0.0-alpha02` or newer.
 
