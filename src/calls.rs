@@ -25,7 +25,10 @@ use ntgcalls::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::media::{auto_media_at_probed, auto_media_probed};
+use crate::media::{
+    auto_media_at_probed, auto_media_passthrough_at_probed, auto_media_passthrough_probed,
+    auto_media_probed,
+};
 use crate::{error::TgCallsError, Call, CallEvent};
 
 type EventHandler = Arc<dyn Fn(i64, CallEvent) + Send + Sync>;
@@ -467,6 +470,41 @@ impl Calls {
 
         let worker = self.get_or_create(chat_id).await?;
         worker.send(|r| Command::Play(media, duration, r)).await
+    }
+
+    /// Like [`Calls::play`], but keeps the media encoded end to end
+    /// (passthrough): Opus audio and H.264 / VP8 / VP9 video are forwarded
+    /// as they are, anything else is encoded once by ffmpeg instead of being
+    /// decoded to raw frames and encoded again by ntgcalls. Much lighter on
+    /// the CPU, which is what you want with many calls on one machine. See
+    /// [`crate::Media::audio_passthrough`] for the details and limits.
+    pub async fn play_passthrough(
+        &self,
+        chat_id: i64,
+        source: impl Into<String>,
+    ) -> Result<(), TgCallsError> {
+        let source = source.into();
+        let (media, duration) = auto_media_passthrough_probed(&source, 1280, 720, 30).await;
+
+        let worker = self.get_or_create(chat_id).await?;
+        worker.send(|r| Command::Play(media, duration, r)).await
+    }
+
+    /// [`Calls::seek`] for passthrough media, see [`Calls::play_passthrough`].
+    pub async fn seek_passthrough(
+        &self,
+        chat_id: i64,
+        source: impl Into<String>,
+        offset: Duration,
+    ) -> Result<(), TgCallsError> {
+        let source = source.into();
+        let (media, duration) =
+            auto_media_passthrough_at_probed(&source, offset, 1280, 720, 30).await;
+
+        let worker = self.get_or_create(chat_id).await?;
+        worker
+            .send(|r| Command::Seek(media, duration, offset, r))
+            .await
     }
 
     /// Joins and streams exactly `media`, or switches to it if already

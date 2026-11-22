@@ -34,12 +34,12 @@ Add `tgcalls` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tgcalls = "=0.4.0-beta1"
+tgcalls = "=0.4.0-beta2"
 ```
 
 Before using `tgcalls`, make sure you have:
 
-- **FFmpeg** available on your `PATH` for media decoding.
+- **FFmpeg** available on your `PATH` to read and convert media. Not needed for media that is already encoded and goes in directly (`Media::audio_ogg`, `Media::video_matroska`, raw PCM, or your own frames via `send_external_frame`).
 
 On Debian/Ubuntu:
 

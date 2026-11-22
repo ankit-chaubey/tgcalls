@@ -91,9 +91,10 @@ pub use p2p::{P2PCall, P2PCallState, P2PEvent};
 pub use signaling::{parse_conference_link, send_p2p_signaling};
 
 pub use ntgcalls::{
-    AudioDescription, AuthParams, CallType, ConnectionMode, DeviceInfo, DhConfig, FrameData,
-    MediaDescription, MediaDevices, MediaSegmentPartStatus, MediaSource, MediaState, NTgCalls,
-    RTCServer, SsrcGroup, StreamDevice, StreamMode, StreamStatus, StreamType, VideoDescription,
+    AudioDescription, AuthParams, CallType, Codec, ConnectionMode, DeviceInfo, DhConfig, Format,
+    FrameData, MediaDescription, MediaDevices, MediaSegmentPartStatus, MediaSource, MediaState,
+    NTgCalls, RTCServer, SsrcGroup, StreamDevice, StreamMode, StreamStatus, StreamType,
+    VideoDescription,
 };
 
 /// Round-trip time to the native ntgcalls layer, in milliseconds. A basic
