@@ -13,10 +13,32 @@
 //!   once with your `Dispatcher` and most bots never touch [`Call`] at all.
 //!
 //! [`Media`] builds the ffmpeg-backed (or device-backed) sources both
-//! layers stream. [`P2PCall`] is the separate private (1:1) call flow.
+//! layers stream. [`MediaStream`] is the shorter way in: one builder with
+//! [`AudioQuality`] and [`VideoQuality`] presets, passthrough and a start
+//! offset, played with [`Calls::play_stream`].
+//! [`P2PCall`] is the separate private (1:1) call flow.
 //! [`ConferenceCall`] is Telegram's newer E2E-encrypted call type - a
 //! genuinely different join/signaling flow (block chains, not participant
 //! updates), documented in the `e2e` module.
+//!
+//! # Where ffmpeg is needed
+//!
+//! ntgcalls reads and writes a few formats itself. [`Media`] only starts
+//! ffmpeg for what it cannot read:
+//!
+//! | You have | Use | ffmpeg |
+//! |---|---|---|
+//! | Ogg Opus file | `Media::audio_ogg`, or `audio_passthrough` / `play_passthrough` | no |
+//! | Matroska (`.mkv` / `.webm`) with H.264, VP8, VP9 or AV1 | `Media::video_matroska`, or `video_passthrough` / `play_passthrough` | no (its audio track: yes, a copy) |
+//! | Raw PCM or I420 file | `Media::audio_raw` / `video_raw` | no |
+//! | Your own Opus packets or encoded frames | `Media::external_opus_audio` / `external_encoded_video` | no |
+//! | Your own raw PCM or I420 frames | `Media::external_audio` / `external_video` | no |
+//! | Microphone, camera, screen | `Media::microphone` / `camera` / `screen` | no |
+//! | Recording to `.ogg` `.opus` `.pcm` `.raw` `.mkv` `.webm` | `Media::record_audio` / `record_video` | no |
+//! | Anything else: mp3, mp4, URLs, other codecs, recording to `.mp3` | `Calls::play`, `Media::audio` / `video` / `av` | yes |
+//!
+//! `play_passthrough` and the `*_passthrough` builders look inside the file
+//! and take the direct route when they can. Seeking always uses ffmpeg.
 //!
 //! # Controls
 //!
@@ -73,6 +95,8 @@ mod error;
 mod media;
 mod p2p;
 mod signaling;
+mod sniff;
+mod stream;
 
 use std::time::Instant;
 
@@ -89,11 +113,13 @@ pub use media::{
 };
 pub use p2p::{P2PCall, P2PCallState, P2PEvent};
 pub use signaling::{parse_conference_link, send_p2p_signaling};
+pub use stream::{AudioQuality, MediaStream, VideoQuality};
 
 pub use ntgcalls::{
-    AudioDescription, AuthParams, CallType, ConnectionMode, DeviceInfo, DhConfig, FrameData,
-    MediaDescription, MediaDevices, MediaSegmentPartStatus, MediaSource, MediaState, NTgCalls,
-    RTCServer, SsrcGroup, StreamDevice, StreamMode, StreamStatus, StreamType, VideoDescription,
+    AudioDescription, AuthParams, CallType, Codec, ConnectionMode, DeviceInfo, DhConfig, Format,
+    FrameData, MediaDescription, MediaDevices, MediaSegmentPartStatus, MediaSource, MediaState,
+    NTgCalls, RTCServer, SsrcGroup, StreamDevice, StreamMode, StreamStatus, StreamType,
+    VideoDescription,
 };
 
 /// Round-trip time to the native ntgcalls layer, in milliseconds. A basic

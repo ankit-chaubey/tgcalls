@@ -14,7 +14,7 @@ On the first run you'll be asked for your phone number, Telegram sends you a log
 A few things worth knowing up front:
 
 - **Everything runs as a client (a userbot), on your own account.** Calls are an MTProto thing, so you need a real user session. Bot tokens can't join calls.
-- **You need `ffmpeg` installed.** `Media::audio`, `Media::video` and `Media::av` decode your file through ffmpeg. Raw PCM (`Media::audio_raw`) is the one exception.
+- **You need `ffmpeg` installed for most things.** `Media::audio`, `Media::video`, `Media::av` and the passthrough helpers use it to read your file. It is not needed when the media is already encoded and goes in directly: an Ogg Opus file (`Media::audio_ogg`), a Matroska file with H.264 / VP8 / VP9 / AV1 (`Media::video_matroska`), a recording to `.ogg`, `.opus`, `.pcm`, `.raw` or `.mkv`, raw PCM (`Media::audio_raw`), or frames you feed yourself with `send_external_frame`.
 - **`chat_id` is the group or channel with the voice chat**, like `-1001234567890`. P2P examples take a `user_id` instead.
 - The examples are meant for reading as much as running. Each one has a comment block at the top explaining what it does and why.
 
@@ -110,7 +110,36 @@ cargo run --example call_bitrate -- -1001234567890 /path/to/song.mp3 64000
 
 A rough guide: 24000 to 32000 is fine for voice, 64000 is good for music, 128000 and up is high quality. Changing it swaps the microphone source, so the track restarts from the beginning.
 
-> Needs ntgcalls `3.1.0-alpha01` or newer, which is what this version of tgcalls pins (it's on `3.1.0-beta01` now).
+> Needs ntgcalls `3.1.0-alpha01` or newer. This version of tgcalls pins `4.0.0-beta01`.
+
+### `passthrough_calls.rs`
+
+Plays media without decoding it. Normally every source is decoded to raw frames and ntgcalls encodes it again. Here Opus audio and H.264 / VP8 / VP9 video are forwarded as they are, and anything else is encoded once by ffmpeg. Same result with a lot less CPU, which matters on a phone or a small VPS with many calls.
+
+```
+cargo run --example passthrough_calls -- -1001234567890 /path/to/video.mp4
+```
+
+While it plays you can type:
+
+- `seek <seconds>` to restart at that position.
+- `ogg <file.ogg>` to play an Ogg Opus file straight through ntgcalls, no ffmpeg.
+- `mkv <file> <w> <h> <fps> [audio.ogg]` to play a `.mkv` or `.webm` straight through ntgcalls, no ffmpeg. Add an Ogg Opus file at the end if you want sound with it, for example `mkv clip.webm 1280 720 30 clip.ogg`. The video must be H.264, VP8, VP9 or AV1, and the size and fps must match the file.
+- `quit` to leave.
+
+> A source that is already Opus or H.264 is copied untouched, so the video is not rescaled. Anything else is encoded to H.264 inside the 1280x720 box. Needs ntgcalls `4.0.0-beta01` or newer.
+
+### `stream_presets.rs`
+
+The shortest way to play with a chosen quality. `MediaStream` is one builder: the source, an audio preset (`voice` to `master`), a video preset (`360` to `4k`), passthrough on or off, and a start offset. Everything has a default, so `MediaStream::new(path)` alone works.
+
+```
+cargo run --example stream_presets -- -1001234567890 /path/to/video.mp4 high 720
+```
+
+While it plays you can type `audio <preset>`, `video <preset>`, `seek <seconds>`, `passthrough on|off` or `quit`. Each one rebuilds the stream and plays it again.
+
+> Audio presets set the Opus bitrate only. With passthrough, an Opus source that is copied as it is keeps its own bitrate, because nothing is encoded. There is no video bitrate, ntgcalls does not have one.
 
 ### `call_messages.rs`
 
@@ -148,7 +177,7 @@ Pairs of `<chat_id> <file>`, as many as you like.
 
 ### `recording_calls.rs`
 
-Records the incoming audio of a voice chat to a file for a number of seconds. If you aren't in the call yet, it joins silently first.
+Records the incoming audio of a voice chat to a file for a number of seconds. If you aren't in the call yet, it joins silently first. Use `out.ogg` instead of `out.mp3` and the received Opus is saved as it is, no ffmpeg.
 
 ```
 cargo run --example recording_calls -- -1001234567890 out.mp3 60
@@ -220,7 +249,7 @@ The chat side of a conference. Starts one, rings a user, then prints every messa
 cargo run --example conference_messages -- -1001234567890 123456789
 ```
 
-> Like [`call_messages`](#call_messagesrs), this needs the manager registered as middleware on a `Dispatcher`, which the example already does. Needs ntgcalls `3.1.0-beta01` or newer.
+> Like [`call_messages`](#call_messagesrs), this needs the manager registered as middleware on a `Dispatcher`, which the example already does. Needs ntgcalls `3.1.0-beta01` or newer. This version of tgcalls pins `4.0.0-beta01`.
 
 ---
 
@@ -252,6 +281,8 @@ The controls (mute, pause, camera, screen, and so on) are named the same on all 
 | `call_controls` | `Calls` | `chat_id`, file | mute, pause, camera, mic, screen from stdin |
 | `mute_resume_calls` | `Calls` | `chat_id`, file, `user_id` | mute, volume, pause in code |
 | `call_bitrate` | `Calls` | `chat_id`, file | set and change audio bitrate |
+| `passthrough_calls` | `Calls` | `chat_id`, file | play without decoding, seek, direct Ogg |
+| `stream_presets` | `Calls` | `chat_id`, file, presets | `MediaStream` builder with quality presets |
 | `call_messages` | `Calls` | `chat_id`, file | read and send voice chat messages |
 | `queue_calls` | `Calls` | `chat_id`, files | play files back to back |
 | `graceful_shutdown` | `Calls` | `chat_id` + file pairs | leave every chat on Ctrl+C |

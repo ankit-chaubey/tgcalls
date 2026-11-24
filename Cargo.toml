@@ -1,6 +1,6 @@
 [package]
 name            = "tgcalls"
-version         = "0.4.0-beta1"
+version         = "0.4.0-beta3"
 edition         = "2021"
 authors         = ["Ankit Chaubey <ankitchaubey.dev@gmail.com>"]
 license         = "MIT OR Apache-2.0"
@@ -88,10 +88,18 @@ path = "examples/call_messages.rs"
 name = "conference_messages"
 path = "examples/conference_messages.rs"
 
+[[example]]
+name = "passthrough_calls"
+path = "examples/passthrough_calls.rs"
+
+[[example]]
+name = "stream_presets"
+path = "examples/stream_presets.rs"
+
 [dependencies]
 ferogram     = "0.6.7"
-ntgcalls     = "=3.1.0-beta01"
-ntgcalls-sys = "=3.1.0-beta01"
+ntgcalls     = "=4.0.0-beta01"
+ntgcalls-sys = "=4.0.0-beta01"
 tokio        = { version = "1.23.1", features = ["full"] }
 thiserror    = "2"
 tracing      = "0.1"
