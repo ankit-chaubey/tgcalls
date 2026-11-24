@@ -78,6 +78,16 @@ calls.play(chat_id, "song.mp3").await?;
 
 Behind the scenes, **TgCalls** handles everything required to get your media into the call. It creates or joins the group call, establishes the media connection, negotiates with Telegram, and streams your audio or video through FFmpeg. All you need to provide is the client, the chat, and the media you want to play.
 
+To pick a quality, build a `MediaStream`. Audio presets set the Opus bitrate, video presets set the size and frame rate:
+
+```rust
+let stream = MediaStream::new("movie.mkv")
+    .audio_quality(AudioQuality::High)
+    .video_quality(VideoQuality::Hd720)
+    .passthrough(true);
+calls.play_stream(chat_id, stream).await?;
+```
+
 To leave the call:
 
 ```rust

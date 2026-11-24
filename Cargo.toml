@@ -92,6 +92,10 @@ path = "examples/conference_messages.rs"
 name = "passthrough_calls"
 path = "examples/passthrough_calls.rs"
 
+[[example]]
+name = "stream_presets"
+path = "examples/stream_presets.rs"
+
 [dependencies]
 ferogram     = "0.6.7"
 ntgcalls     = "=4.0.0-beta01"

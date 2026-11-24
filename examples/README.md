@@ -129,6 +129,18 @@ While it plays you can type:
 
 > A source that is already Opus or H.264 is copied untouched, so the video is not rescaled. Anything else is encoded to H.264 inside the 1280x720 box. Needs ntgcalls `4.0.0-beta01` or newer.
 
+### `stream_presets.rs`
+
+The shortest way to play with a chosen quality. `MediaStream` is one builder: the source, an audio preset (`voice` to `master`), a video preset (`360` to `4k`), passthrough on or off, and a start offset. Everything has a default, so `MediaStream::new(path)` alone works.
+
+```
+cargo run --example stream_presets -- -1001234567890 /path/to/video.mp4 high 720
+```
+
+While it plays you can type `audio <preset>`, `video <preset>`, `seek <seconds>`, `passthrough on|off` or `quit`. Each one rebuilds the stream and plays it again.
+
+> Audio presets set the Opus bitrate only. With passthrough, an Opus source that is copied as it is keeps its own bitrate, because nothing is encoded. There is no video bitrate, ntgcalls does not have one.
+
 ### `call_messages.rs`
 
 Prints every message posted in the voice chat's live chat, and sends whatever you type.
@@ -270,6 +282,7 @@ The controls (mute, pause, camera, screen, and so on) are named the same on all 
 | `mute_resume_calls` | `Calls` | `chat_id`, file, `user_id` | mute, volume, pause in code |
 | `call_bitrate` | `Calls` | `chat_id`, file | set and change audio bitrate |
 | `passthrough_calls` | `Calls` | `chat_id`, file | play without decoding, seek, direct Ogg |
+| `stream_presets` | `Calls` | `chat_id`, file, presets | `MediaStream` builder with quality presets |
 | `call_messages` | `Calls` | `chat_id`, file | read and send voice chat messages |
 | `queue_calls` | `Calls` | `chat_id`, files | play files back to back |
 | `graceful_shutdown` | `Calls` | `chat_id` + file pairs | leave every chat on Ctrl+C |

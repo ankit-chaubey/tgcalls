@@ -228,6 +228,14 @@ fn can_copy_video(codec: Option<&str>) -> bool {
     matches!(codec, Some("h264" | "vp8" | "vp9"))
 }
 
+/// The bitrate argument of the passthrough Opus encode. `apply_audio_bitrate`
+/// swaps exactly this text, so both sides use the one constant.
+const OPUS_BITRATE_ARG: &str = "-b:a 64k";
+
+/// Opus accepts 6 to 510 kbit/s.
+const OPUS_MIN_BPS: u32 = 6_000;
+const OPUS_MAX_BPS: u32 = 510_000;
+
 /// ffmpeg -> Ogg on stdout. `copy` remuxes an existing Opus stream
 /// untouched; otherwise it is encoded to Opus once, here, instead of being
 /// decoded to PCM and encoded again by ntgcalls.
@@ -240,9 +248,9 @@ fn audio_passthrough_cmd(path: &str, offset: Duration, copy: bool) -> String {
     let seek = seek_flag(offset);
     let path = shell_quote(path);
     let codec = if copy {
-        "-c:a copy"
+        "-c:a copy".to_string()
     } else {
-        "-c:a libopus -ar 48000 -ac 2 -b:a 64k -frame_duration 20"
+        format!("-c:a libopus -ar 48000 -ac 2 {OPUS_BITRATE_ARG} -frame_duration 20")
     };
     format!("ffmpeg -v error {seek}{reconnect} -i {path} -vn {codec} -f ogg pipe:1")
 }
@@ -498,6 +506,51 @@ pub(crate) async fn auto_media_passthrough_at_probed(
     fps: u8,
 ) -> (MediaDescription, Option<Duration>) {
     passthrough_media(source, offset, width, height, fps).await
+}
+
+/// Plans one source for [`crate::MediaStream`]: probes it once and returns
+/// the media plus its duration. `passthrough` picks the encoded route (see
+/// `passthrough_media`), otherwise the source is decoded to PCM / I420. A
+/// non-zero `offset` starts both streams that far into the source.
+pub(crate) async fn plan_stream(
+    source: &str,
+    offset: Duration,
+    width: i16,
+    height: i16,
+    fps: u8,
+    passthrough: bool,
+) -> (MediaDescription, Option<Duration>) {
+    if passthrough {
+        return passthrough_media(source, offset, width, height, fps).await;
+    }
+    let probed = probe(source).await;
+    let media = media_for_at(
+        source,
+        offset,
+        probed.has_video,
+        probed.has_audio,
+        width,
+        height,
+        fps,
+    );
+    (media, probed.duration)
+}
+
+/// Sets the outgoing audio bitrate of `media`, clamped to what Opus accepts.
+///
+/// ntgcalls encodes the decoded (PCM) route itself, so there it is the
+/// description's `bitrate`. The passthrough route encodes in ffmpeg, so the
+/// bitrate is also written into that command. A copied Opus stream is not
+/// encoded anywhere and keeps the bitrate it already has.
+pub(crate) fn apply_audio_bitrate(media: &mut MediaDescription, bits_per_second: u32) {
+    let bps = bits_per_second.clamp(OPUS_MIN_BPS, OPUS_MAX_BPS);
+    let Some(mic) = media.microphone.as_mut() else {
+        return;
+    };
+    mic.bitrate = Some(bps);
+    if mic.media_source == MediaSource::Shell && matches!(mic.format, Some(Format::Ogg)) {
+        mic.input = mic.input.replace(OPUS_BITRATE_ARG, &format!("-b:a {bps}"));
+    }
 }
 
 pub struct Media;

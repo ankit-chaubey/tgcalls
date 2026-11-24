@@ -13,7 +13,10 @@
 //!   once with your `Dispatcher` and most bots never touch [`Call`] at all.
 //!
 //! [`Media`] builds the ffmpeg-backed (or device-backed) sources both
-//! layers stream. [`P2PCall`] is the separate private (1:1) call flow.
+//! layers stream. [`MediaStream`] is the shorter way in: one builder with
+//! [`AudioQuality`] and [`VideoQuality`] presets, passthrough and a start
+//! offset, played with [`Calls::play_stream`].
+//! [`P2PCall`] is the separate private (1:1) call flow.
 //! [`ConferenceCall`] is Telegram's newer E2E-encrypted call type - a
 //! genuinely different join/signaling flow (block chains, not participant
 //! updates), documented in the `e2e` module.
@@ -93,6 +96,7 @@ mod media;
 mod p2p;
 mod signaling;
 mod sniff;
+mod stream;
 
 use std::time::Instant;
 
@@ -109,6 +113,7 @@ pub use media::{
 };
 pub use p2p::{P2PCall, P2PCallState, P2PEvent};
 pub use signaling::{parse_conference_link, send_p2p_signaling};
+pub use stream::{AudioQuality, MediaStream, VideoQuality};
 
 pub use ntgcalls::{
     AudioDescription, AuthParams, CallType, Codec, ConnectionMode, DeviceInfo, DhConfig, Format,
