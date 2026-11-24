@@ -34,7 +34,7 @@ Add `tgcalls` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tgcalls = "=0.4.0-beta2"
+tgcalls = "=0.4.0-beta3"
 ```
 
 Before using `tgcalls`, make sure you have:

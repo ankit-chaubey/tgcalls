@@ -5,6 +5,11 @@
 // as they are, and anything else is encoded once by ffmpeg. Same result, far
 // less CPU, which adds up quickly when one machine holds many calls.
 //
+// Files ntgcalls can read as they are (an Ogg Opus file, or a Matroska file
+// with H.264 / VP8 / VP9 / AV1 video) are detected and handed over directly,
+// with no ffmpeg at all. The audio inside a Matroska file is the one part
+// that still goes through an ffmpeg copy.
+//
 // usage: passthrough_calls <chat_id> <file_or_url>
 //
 // commands while playing:

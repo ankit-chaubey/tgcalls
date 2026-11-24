@@ -4,6 +4,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ntgcalls::{
@@ -12,6 +13,7 @@ use ntgcalls::{
 };
 
 use crate::error::TgCallsError;
+use crate::sniff::{sniff, Mkv, MkvVideo, Sniffed};
 
 /// What one `ffprobe` pass tells us about a source: which stream types are
 /// present, and its total duration if it has one. `auto_media`/`auto_media_at`
@@ -284,6 +286,7 @@ fn audio_passthrough(path: &str, offset: Duration, codec: Option<&str>) -> Audio
         keep_open: false,
         bitrate: None,
         format: Some(Format::Ogg),
+        max_delay_ms: None,
     }
 }
 
@@ -347,9 +350,134 @@ fn media_for_passthrough(
     }
 }
 
-/// Passthrough twin of [`auto_media_probed`]: probes `source` and builds the
-/// encoded (Ogg / Matroska) description for it, copying streams that are
-/// already Opus / H.264 / VP8 / VP9 and encoding the rest once. What
+/// Is `ffmpeg` on the `PATH`? Checked once.
+fn ffmpeg_available() -> bool {
+    static FOUND: OnceLock<bool> = OnceLock::new();
+    *FOUND.get_or_init(|| {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+/// An Ogg Opus file read by ntgcalls itself, no ffmpeg involved.
+fn ogg_file(path: &str) -> AudioDescription {
+    AudioDescription {
+        media_source: MediaSource::File,
+        sample_rate: 48000,
+        channel_count: 2,
+        input: path.to_string(),
+        keep_open: false,
+        bitrate: None,
+        format: Some(Format::Ogg),
+        max_delay_ms: None,
+    }
+}
+
+/// A Matroska video read by ntgcalls itself. Size and fps come from the
+/// file, because a direct stream is never rescaled; the requested values are
+/// only the fallback for files that do not state them.
+fn matroska_file(
+    path: &str,
+    track: &MkvVideo,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> VideoDescription {
+    let dim = |own: u32, requested: i16| {
+        if own > 0 {
+            i16::try_from(own).unwrap_or(i16::MAX)
+        } else {
+            requested
+        }
+    };
+    let fps = track
+        .fps
+        .map(|f| f.round().clamp(1.0, 255.0) as u8)
+        .unwrap_or(fps);
+    VideoDescription {
+        media_source: MediaSource::File,
+        width: dim(track.width, width),
+        height: dim(track.height, height),
+        fps,
+        input: path.to_string(),
+        keep_open: false,
+        format: Some(Format::Matroska),
+    }
+}
+
+/// The video track of `path` if ntgcalls can read it directly.
+fn direct_video(path: &str) -> Option<Mkv> {
+    match sniff(path)? {
+        Sniffed::Matroska(mkv) if mkv.video.as_ref().is_some_and(|t| t.codec.is_some()) => {
+            Some(mkv)
+        }
+        _ => None,
+    }
+}
+
+/// Everything `Calls::play_passthrough` / `seek_passthrough` need. A local
+/// file ntgcalls can read as it is (Ogg Opus, Matroska with H.264 / VP8 /
+/// VP9 / AV1) is handed over directly, with no ffmpeg and no ffprobe. A
+/// Matroska file's audio is the one part ntgcalls cannot read, so that
+/// still goes through an ffmpeg remux when ffmpeg exists. Everything else,
+/// and any seek (which needs ffmpeg's `-ss`), takes the ffmpeg route.
+async fn passthrough_media(
+    source: &str,
+    offset: Duration,
+    width: i16,
+    height: i16,
+    fps: u8,
+) -> (MediaDescription, Option<Duration>) {
+    if offset.is_zero() {
+        let owned = source.to_string();
+        let sniffed = tokio::task::spawn_blocking(move || sniff(&owned))
+            .await
+            .ok()
+            .flatten();
+        match sniffed {
+            Some(Sniffed::OggOpus { duration }) => return (Media::audio_ogg(source), duration),
+            Some(Sniffed::Matroska(mkv)) => {
+                if let Some(track) = mkv.video.as_ref().filter(|t| t.codec.is_some()) {
+                    let microphone = match mkv.audio_codec.as_deref() {
+                        None => None,
+                        Some(codec) if ffmpeg_available() => Some(audio_passthrough(
+                            source,
+                            Duration::ZERO,
+                            (codec == "A_OPUS").then_some("opus"),
+                        )),
+                        Some(_) => {
+                            tracing::warn!(
+                                "tgcalls: {source} has audio, but Matroska audio can only be read \
+                                 through ffmpeg and ffmpeg was not found; playing video only"
+                            );
+                            None
+                        }
+                    };
+                    let media = MediaDescription {
+                        microphone,
+                        speaker: None,
+                        camera: Some(matroska_file(source, track, width, height, fps)),
+                        screen: None,
+                    };
+                    return (media, mkv.duration);
+                }
+            }
+            None => {}
+        }
+    }
+    let probed = probe(source).await;
+    (
+        media_for_passthrough(source, offset, &probed, width, height, fps),
+        probed.duration,
+    )
+}
+
+/// Passthrough twin of [`auto_media_probed`], see `passthrough_media`. What
 /// `Calls::play_passthrough` uses.
 pub(crate) async fn auto_media_passthrough_probed(
     source: &str,
@@ -357,11 +485,7 @@ pub(crate) async fn auto_media_passthrough_probed(
     height: i16,
     fps: u8,
 ) -> (MediaDescription, Option<Duration>) {
-    let probed = probe(source).await;
-    (
-        media_for_passthrough(source, Duration::ZERO, &probed, width, height, fps),
-        probed.duration,
-    )
+    passthrough_media(source, Duration::ZERO, width, height, fps).await
 }
 
 /// Like `auto_media_passthrough_probed`, starting at `offset`. What
@@ -373,11 +497,7 @@ pub(crate) async fn auto_media_passthrough_at_probed(
     height: i16,
     fps: u8,
 ) -> (MediaDescription, Option<Duration>) {
-    let probed = probe(source).await;
-    (
-        media_for_passthrough(source, offset, &probed, width, height, fps),
-        probed.duration,
-    )
+    passthrough_media(source, offset, width, height, fps).await
 }
 
 pub struct Media;
@@ -561,6 +681,7 @@ impl Media {
                 keep_open: false,
                 bitrate: None,
                 format: Some(Format::Pcm),
+                max_delay_ms: None,
             }),
             speaker: None,
             camera: None,
@@ -582,6 +703,7 @@ impl Media {
                 keep_open: false,
                 bitrate: None,
                 format: Some(Format::Pcm),
+                max_delay_ms: None,
             }),
             speaker: None,
             camera: None,
@@ -600,6 +722,7 @@ impl Media {
                 keep_open: false,
                 bitrate: None,
                 format: Some(Format::Pcm),
+                max_delay_ms: None,
             }),
             speaker: None,
             camera: None,
@@ -676,6 +799,7 @@ impl Media {
                 keep_open: false,
                 bitrate: None,
                 format: Some(Format::Pcm),
+                max_delay_ms: None,
             }),
             speaker: None,
             camera: Some(VideoDescription {
@@ -712,6 +836,7 @@ impl Media {
                 keep_open: false,
                 bitrate: None,
                 format: Some(Format::Pcm),
+                max_delay_ms: None,
             }),
             speaker: None,
             camera: Some(VideoDescription {
@@ -785,6 +910,7 @@ impl Media {
             keep_open: true,
             bitrate: None,
             format: Some(Format::Pcm),
+            max_delay_ms: None,
         }
     }
 
@@ -804,6 +930,7 @@ impl Media {
             keep_open: true,
             bitrate: None,
             format: None,
+            max_delay_ms: None,
         }
     }
 
@@ -835,15 +962,25 @@ impl Media {
             keep_open: true,
             bitrate: None,
             format: None,
+            max_delay_ms: None,
         }
     }
 
-    /// Records the call's incoming audio to `path` (encoded by ffmpeg from
-    /// raw PCM). Pass to `set_sources` (on any call type) with
-    /// `StreamMode::Playback`, not `Capture` - same field, opposite
-    /// direction, controlled entirely by the mode you pass.
+    /// Records the call's incoming audio to `path`. Pass to `set_sources`
+    /// (on any call type) with `StreamMode::Playback`, not `Capture` - same
+    /// field, opposite direction, controlled entirely by the mode you pass.
+    ///
+    /// The extension picks the route: `.ogg` / `.opus` write the received
+    /// Opus as it is ([`Media::record_audio_ogg`]) and `.pcm` / `.raw` write
+    /// raw PCM ([`Media::record_audio_raw`]), neither needing ffmpeg. Any
+    /// other extension (`.mp3`, `.wav`, ...) is encoded by ffmpeg.
     pub fn record_audio(path: impl Into<String>) -> MediaDescription {
         let path = path.into();
+        match extension(&path).as_deref() {
+            Some("ogg" | "opus") => return Self::record_audio_ogg(path),
+            Some("pcm" | "raw") => return Self::record_audio_raw(path),
+            _ => {}
+        }
         MediaDescription {
             microphone: Some(AudioDescription {
                 media_source: MediaSource::Shell,
@@ -853,6 +990,7 @@ impl Media {
                 keep_open: false,
                 bitrate: None,
                 format: Some(Format::Pcm),
+                max_delay_ms: None,
             }),
             speaker: None,
             camera: None,
@@ -862,7 +1000,10 @@ impl Media {
 
     /// Records the call's incoming camera video to `path`. Use
     /// [`Media::record_screen`] for an incoming screen-share instead. Same
-    /// `StreamMode::Playback` caveat as [`Media::record_audio`].
+    /// `StreamMode::Playback` caveat as [`Media::record_audio`]. A `.mkv` or
+    /// `.webm` path writes the received video as it is
+    /// ([`Media::record_video_matroska`], no ffmpeg); any other extension is
+    /// encoded by ffmpeg.
     pub fn record_video(
         path: impl Into<String>,
         width: i16,
@@ -870,6 +1011,9 @@ impl Media {
         fps: u8,
     ) -> MediaDescription {
         let path = path.into();
+        if matches!(extension(&path).as_deref(), Some("mkv" | "webm")) {
+            return Self::record_video_matroska(path, width, height, fps);
+        }
         let w = (width.max(2) as u32) & !1;
         let h = (height.max(2) as u32) & !1;
         MediaDescription {
@@ -889,7 +1033,8 @@ impl Media {
     }
 
     /// Records an incoming screen-share to `path`, as opposed to camera
-    /// video - see [`Media::record_video`].
+    /// video - see [`Media::record_video`], including the `.mkv` / `.webm`
+    /// shortcut that skips ffmpeg.
     pub fn record_screen(
         path: impl Into<String>,
         width: i16,
@@ -897,6 +1042,9 @@ impl Media {
         fps: u8,
     ) -> MediaDescription {
         let path = path.into();
+        if matches!(extension(&path).as_deref(), Some("mkv" | "webm")) {
+            return Self::record_screen_matroska(path, width, height, fps);
+        }
         let w = (width.max(2) as u32) & !1;
         let h = (height.max(2) as u32) & !1;
         MediaDescription {
@@ -924,11 +1072,15 @@ impl Media {
 /// adds no quality loss, which matters on a phone or a small VPS with many
 /// calls. Needs ntgcalls 4.0 (the `format` field).
 impl Media {
-    /// Audio from any file or URL ffmpeg understands, sent as Opus. An
-    /// Opus source is remuxed untouched; anything else is encoded to Opus
-    /// once (48 kHz stereo, 64 kbit/s) instead of PCM-then-Opus.
+    /// Audio from any file or URL, sent as Opus. An Ogg Opus file goes
+    /// straight to ntgcalls with no ffmpeg at all. Another Opus source is
+    /// remuxed untouched by ffmpeg; anything else is encoded to Opus once
+    /// (48 kHz stereo, 64 kbit/s) instead of PCM-then-Opus.
     pub fn audio_passthrough(path: impl Into<String>) -> MediaDescription {
         let path = path.into();
+        if matches!(sniff(&path), Some(Sniffed::OggOpus { .. })) {
+            return Self::audio_ogg(path);
+        }
         let codec = probe_codec(&path, "a:0");
         MediaDescription {
             microphone: Some(audio_passthrough(&path, Duration::ZERO, codec.as_deref())),
@@ -938,9 +1090,11 @@ impl Media {
         }
     }
 
-    /// Video from any file or URL, sent encoded. H.264 / VP8 / VP9 sources
-    /// are remuxed untouched (then `width`/`height` only describe the
-    /// stream, they do not rescale it); anything else is encoded once to
+    /// Video from any file or URL, sent encoded. A Matroska file with
+    /// H.264 / VP8 / VP9 / AV1 video goes straight to ntgcalls with no
+    /// ffmpeg at all. Other H.264 / VP8 / VP9 sources are remuxed untouched
+    /// by ffmpeg (in both cases `width`/`height` only describe the stream,
+    /// they do not rescale it); anything else is encoded once to
     /// low-latency H.264 inside the `width`x`height` box.
     pub fn video_passthrough(
         path: impl Into<String>,
@@ -949,6 +1103,16 @@ impl Media {
         fps: u8,
     ) -> MediaDescription {
         let path = path.into();
+        if let Some(mkv) = direct_video(&path) {
+            if let Some(track) = mkv.video.as_ref() {
+                return MediaDescription {
+                    microphone: None,
+                    speaker: None,
+                    camera: Some(matroska_file(&path, track, width, height, fps)),
+                    screen: None,
+                };
+            }
+        }
         let codec = probe_codec(&path, "v:0");
         MediaDescription {
             microphone: None,
@@ -982,15 +1146,7 @@ impl Media {
     /// all. The file must already be Ogg Opus.
     pub fn audio_ogg(path: impl Into<String>) -> MediaDescription {
         MediaDescription {
-            microphone: Some(AudioDescription {
-                media_source: MediaSource::File,
-                sample_rate: 48000,
-                channel_count: 2,
-                input: path.into(),
-                keep_open: false,
-                bitrate: None,
-                format: Some(Format::Ogg),
-            }),
+            microphone: Some(ogg_file(&path.into())),
             speaker: None,
             camera: None,
             screen: None,
@@ -1033,6 +1189,7 @@ impl Media {
             keep_open: true,
             bitrate: None,
             format: Some(Format::Ogg),
+            max_delay_ms: None,
         }
     }
 
@@ -1113,6 +1270,78 @@ impl Media {
     }
 }
 
+/// Raw frames and tuning, all read or written by ntgcalls itself.
+impl Media {
+    /// Video from a raw YUV420p (I420) file. Skips ffmpeg entirely; the file
+    /// must already be `width`x`height` at `fps`, it is never rescaled.
+    pub fn video_raw(
+        path: impl Into<String>,
+        width: i16,
+        height: i16,
+        fps: u8,
+    ) -> MediaDescription {
+        MediaDescription {
+            microphone: None,
+            speaker: None,
+            camera: Some(VideoDescription {
+                media_source: MediaSource::File,
+                width,
+                height,
+                fps,
+                input: path.into(),
+                keep_open: false,
+                format: Some(Format::I420),
+            }),
+            screen: None,
+        }
+    }
+
+    /// Records the call's incoming audio to a raw s16le PCM file (48 kHz
+    /// stereo), written by ntgcalls with no ffmpeg. Playback media, like
+    /// [`Media::record_audio`].
+    pub fn record_audio_raw(path: impl Into<String>) -> MediaDescription {
+        let mut media = Self::audio_raw(path);
+        if let Some(mic) = media.microphone.as_mut() {
+            mic.keep_open = false;
+        }
+        media
+    }
+
+    /// Records incoming video to a raw I420 file, written by ntgcalls with
+    /// no ffmpeg. Large: about 1.5 bytes per pixel per frame. Playback
+    /// media, like [`Media::record_video`].
+    pub fn record_video_raw(
+        path: impl Into<String>,
+        width: i16,
+        height: i16,
+        fps: u8,
+    ) -> MediaDescription {
+        Self::video_raw(path, width, height, fps)
+    }
+
+    /// For recordings of incoming audio: how long ntgcalls may hold packets
+    /// back to put them in order and conceal gaps, in milliseconds
+    /// (default 1000). A larger value gives a cleaner recording on a bad
+    /// connection, a smaller one a lower delay. Applies to the audio
+    /// descriptions in `media`.
+    pub fn with_max_delay(mut media: MediaDescription, milliseconds: u32) -> MediaDescription {
+        for audio in [media.microphone.as_mut(), media.speaker.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            audio.max_delay_ms = Some(milliseconds);
+        }
+        media
+    }
+}
+
+/// Lower-cased extension of `path`, if it has one.
+fn extension(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+}
+
 /// First codec name of the stream `select` (`a:0` / `v:0`) in `path`, via a
 /// blocking ffprobe. `None` if ffprobe is missing, times out or the source
 /// has no such stream, which makes passthrough encode instead of copy.
@@ -1174,5 +1403,60 @@ mod tests {
         let (at, _) =
             auto_media_passthrough_at_probed(&both, Duration::from_secs(1), 640, 360, 30).await;
         assert!(at.camera.unwrap().input.contains("-ss 1.000"));
+    }
+
+    fn gen(name: &str, args: &[&str]) -> Option<String> {
+        let dir = std::env::temp_dir().join(format!("tgcalls-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(name);
+        let status = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=320x240:rate=15")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args(["-t", "2"])
+            .args(args)
+            .arg(&path)
+            .status()
+            .ok()?;
+        status
+            .success()
+            .then(|| path.to_string_lossy().into_owned())
+    }
+
+    #[tokio::test]
+    async fn play_passthrough_plans_direct_where_it_can() {
+        let (Some(ogg), Some(mkv)) = (
+            gen("p.ogg", &["-vn", "-c:a", "libopus"]),
+            gen("p.mkv", &["-c:v", "libx264", "-c:a", "libopus"]),
+        ) else {
+            return;
+        };
+
+        // Ogg Opus: audio only, read by ntgcalls itself, duration known.
+        let (media, duration) = auto_media_passthrough_probed(&ogg, 1280, 720, 30).await;
+        let mic = media.microphone.unwrap();
+        assert_eq!(
+            (mic.media_source, mic.input.as_str()),
+            (MediaSource::File, ogg.as_str())
+        );
+        assert!(media.camera.is_none() && duration.is_some());
+
+        // Matroska: video direct at its own size, its audio through an
+        // ffmpeg copy (ntgcalls cannot read audio out of Matroska).
+        let (media, duration) = auto_media_passthrough_probed(&mkv, 1280, 720, 30).await;
+        let cam = media.camera.unwrap();
+        assert_eq!(
+            (cam.media_source, cam.width, cam.height),
+            (MediaSource::File, 320, 240)
+        );
+        let mic = media.microphone.unwrap();
+        assert_eq!(mic.media_source, MediaSource::Shell);
+        assert!(mic.input.contains("-c:a copy"));
+        assert!(duration.is_some());
+
+        // A seek needs ffmpeg's -ss, so it leaves the direct route.
+        let (media, _) =
+            auto_media_passthrough_at_probed(&mkv, Duration::from_secs(1), 1280, 720, 30).await;
+        assert_eq!(media.camera.unwrap().media_source, MediaSource::Shell);
     }
 }

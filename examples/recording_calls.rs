@@ -1,7 +1,11 @@
 // Recording a voice chat's incoming audio to a file, through Calls -
 // joins silently first if not already in the call.
 //
-// usage: recording_calls <chat_id> <output.mp3> <seconds>
+// The output extension picks how it is written: `.ogg` / `.opus` keep the
+// received Opus as it is and `.pcm` / `.raw` write raw PCM, both without
+// ffmpeg. Anything else (`.mp3`, `.wav`, ...) is encoded by ffmpeg.
+//
+// usage: recording_calls <chat_id> <output.mp3|output.ogg> <seconds>
 use tgcalls::{CallEvent, Calls, Media};
 
 #[tokio::main]
@@ -13,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let chat_id: i64 = args
         .next()
-        .expect("usage: recording_calls <chat_id> <output.mp3> <seconds>")
+        .expect("usage: recording_calls <chat_id> <output.mp3|output.ogg> <seconds>")
         .parse()
         .expect("chat_id must be a number");
     let output = args.next().expect("missing output path");

@@ -181,3 +181,136 @@ async fn native_ntgcalls_accepts_encoded_sources() {
         .unwrap();
     assert!(!ntg.get_state(77).await.unwrap().video_stopped);
 }
+
+fn make_ogg(dir: &Path) -> String {
+    let path = dir.join("a.ogg");
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("sine=frequency=440:sample_rate=48000")
+        .args(["-t", "1", "-c:a", "libopus"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn files_ntgcalls_can_read_skip_ffmpeg() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tmp("direct");
+    let ogg = make_ogg(&dir);
+    let mkv = make_file(&dir, "d.mkv", &["-c:v", "libx264", "-c:a", "libopus"]);
+
+    // Ogg Opus: read by ntgcalls itself, the input is just the path.
+    let a = Media::audio_passthrough(&ogg).microphone.unwrap();
+    assert_eq!(
+        (a.media_source, a.format),
+        (MediaSource::File, Some(Format::Ogg))
+    );
+    assert_eq!(a.input, ogg);
+
+    // Matroska video: direct, declared at the file's own size and fps.
+    let v = Media::video_passthrough(&mkv, 1280, 720, 30)
+        .camera
+        .unwrap();
+    assert_eq!(
+        (v.media_source, v.format),
+        (MediaSource::File, Some(Format::Matroska))
+    );
+    assert_eq!((v.width, v.height, v.fps), (320, 240, 15));
+    assert_eq!(v.input, mkv);
+
+    // The audio inside the same Matroska file still needs ffmpeg (copy).
+    let av = Media::av_passthrough(&mkv, &mkv, 1280, 720, 30);
+    assert_eq!(av.camera.unwrap().media_source, MediaSource::File);
+    let mic = av.microphone.unwrap();
+    assert_eq!(mic.media_source, MediaSource::Shell);
+    assert!(mic.input.contains("-c:a copy"), "{}", mic.input);
+}
+
+#[test]
+fn recording_extensions_pick_the_route() {
+    let r = Media::record_audio("x.ogg").microphone.unwrap();
+    assert_eq!(
+        (r.media_source, r.format),
+        (MediaSource::File, Some(Format::Ogg))
+    );
+    let r = Media::record_audio("x.OPUS").microphone.unwrap();
+    assert_eq!(r.format, Some(Format::Ogg));
+    let r = Media::record_audio("x.pcm").microphone.unwrap();
+    assert_eq!(
+        (r.media_source, r.format),
+        (MediaSource::File, Some(Format::Pcm))
+    );
+    let r = Media::record_audio("x.mp3").microphone.unwrap();
+    assert_eq!(r.media_source, MediaSource::Shell);
+
+    let v = Media::record_video("x.webm", 640, 360, 30).camera.unwrap();
+    assert_eq!(
+        (v.media_source, v.format),
+        (MediaSource::File, Some(Format::Matroska))
+    );
+    assert_eq!(
+        Media::record_video("x.mp4", 640, 360, 30)
+            .camera
+            .unwrap()
+            .media_source,
+        MediaSource::Shell
+    );
+    let s = Media::record_screen("x.mkv", 640, 360, 30);
+    assert!(s.screen.is_some() && s.camera.is_none());
+}
+
+#[test]
+fn raw_files_and_max_delay() {
+    let v = Media::video_raw("x.yuv", 640, 360, 30).camera.unwrap();
+    assert_eq!(
+        (v.media_source, v.format),
+        (MediaSource::File, Some(Format::I420))
+    );
+    let r = Media::record_audio_raw("x.pcm").microphone.unwrap();
+    assert_eq!(
+        (r.media_source, r.format),
+        (MediaSource::File, Some(Format::Pcm))
+    );
+    let rv = Media::record_video_raw("x.yuv", 640, 360, 30)
+        .camera
+        .unwrap();
+    assert_eq!(rv.format, Some(Format::I420));
+
+    let media = Media::with_max_delay(Media::record_audio_ogg("x.ogg"), 300);
+    assert_eq!(media.microphone.unwrap().max_delay_ms, Some(300));
+    assert_eq!(
+        Media::record_audio_ogg("x.ogg")
+            .microphone
+            .unwrap()
+            .max_delay_ms,
+        None
+    );
+}
+
+#[tokio::test]
+async fn native_ntgcalls_accepts_direct_files() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tmp("native-direct");
+    let ogg = make_ogg(&dir);
+    let mkv = make_file(&dir, "n.mkv", &["-c:v", "libx264", "-c:a", "libopus"]);
+
+    let ntg = NTgCalls::new();
+    ntg.create_call(78).await.unwrap();
+    let media = MediaDescription {
+        microphone: Media::audio_passthrough(&ogg).microphone,
+        speaker: None,
+        camera: Media::video_passthrough(&mkv, 320, 240, 15).camera,
+        screen: None,
+    };
+    ntg.set_stream_sources(78, StreamMode::Capture, &media)
+        .await
+        .unwrap();
+    assert!(!ntg.get_state(78).await.unwrap().video_stopped);
+}
